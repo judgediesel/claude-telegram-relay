@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.raya.relay</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/markphaneuf/.bun/bin/bun</string>
+        <string>run</string>
+        <string>/Users/markphaneuf/claude-telegram-relay/src/relay.ts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/markphaneuf/claude-telegram-relay</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/markphaneuf/.bun/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/markphaneuf/.claude-relay/logs/relay.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/markphaneuf/.claude-relay/logs/relay.err</string>
+</dict>
+</plist>

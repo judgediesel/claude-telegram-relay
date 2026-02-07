@@ -324,6 +324,144 @@ async function getTodoContext(): Promise<string> {
 }
 
 // ============================================================
+// HABITS (stored in memory table with type="habit")
+// Uses: content=description, deadline=frequency, priority=streak, updated_at=last completion
+// ============================================================
+
+async function storeHabit(description: string, frequency = "daily"): Promise<void> {
+  if (!supabase) return;
+  try {
+    // Deduplicate
+    const { data: existing } = await supabase
+      .from("memory")
+      .select("id")
+      .eq("type", "habit")
+      .ilike("content", `%${description}%`)
+      .limit(1);
+
+    if (existing && existing.length > 0) return;
+
+    await supabase.from("memory").insert({
+      type: "habit",
+      content: description,
+      deadline: frequency, // "daily" or "weekly"
+      priority: 0, // streak count
+    });
+    console.log(`Stored habit: ${description} (${frequency})`);
+  } catch (error) {
+    console.error("storeHabit error:", error);
+  }
+}
+
+async function completeHabit(searchText: string): Promise<void> {
+  if (!supabase) return;
+  try {
+    const { data: habits } = await supabase
+      .from("memory")
+      .select("id, content, priority, updated_at")
+      .eq("type", "habit")
+      .ilike("content", `%${searchText}%`)
+      .limit(1);
+
+    if (!habits || habits.length === 0) {
+      console.log(`No habit found matching: ${searchText}`);
+      return;
+    }
+
+    const habit = habits[0];
+    const now = new Date();
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const todayStr = now.toLocaleDateString("en-US", { timeZone: tz });
+
+    // Check if already done today
+    if (habit.updated_at) {
+      const lastDone = new Date(habit.updated_at).toLocaleDateString("en-US", { timeZone: tz });
+      if (lastDone === todayStr) {
+        console.log(`Habit already done today: ${habit.content}`);
+        return;
+      }
+    }
+
+    // Calculate streak: was it done yesterday?
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toLocaleDateString("en-US", { timeZone: tz });
+    const lastDoneStr = habit.updated_at
+      ? new Date(habit.updated_at).toLocaleDateString("en-US", { timeZone: tz })
+      : "";
+
+    const newStreak = lastDoneStr === yesterdayStr ? (habit.priority || 0) + 1 : 1;
+
+    await supabase
+      .from("memory")
+      .update({
+        priority: newStreak,
+        updated_at: now.toISOString(),
+      })
+      .eq("id", habit.id);
+
+    console.log(`Habit done: ${habit.content} (streak: ${newStreak})`);
+  } catch (error) {
+    console.error("completeHabit error:", error);
+  }
+}
+
+async function removeHabit(searchText: string): Promise<void> {
+  if (!supabase) return;
+  try {
+    const { data: habits } = await supabase
+      .from("memory")
+      .select("id, content")
+      .eq("type", "habit")
+      .ilike("content", `%${searchText}%`)
+      .limit(1);
+
+    if (!habits || habits.length === 0) return;
+
+    await supabase.from("memory").delete().eq("id", habits[0].id);
+    console.log(`Removed habit: ${habits[0].content}`);
+  } catch (error) {
+    console.error("removeHabit error:", error);
+  }
+}
+
+async function getHabitContext(): Promise<string> {
+  if (!supabase) return "";
+
+  try {
+    const { data: habits } = await supabase
+      .from("memory")
+      .select("content, deadline, priority, updated_at")
+      .eq("type", "habit")
+      .order("created_at", { ascending: true });
+
+    if (!habits || habits.length === 0) return "";
+
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const todayStr = new Date().toLocaleDateString("en-US", { timeZone: tz });
+
+    let context = "\nHABITS:\n";
+    context += habits
+      .map((h) => {
+        const streak = h.priority || 0;
+        const lastDone = h.updated_at
+          ? new Date(h.updated_at).toLocaleDateString("en-US", { timeZone: tz })
+          : "";
+        const doneToday = lastDone === todayStr;
+        const status = doneToday ? "DONE" : "NOT YET";
+        const streakStr = streak > 0 ? ` (${streak}-day streak)` : "";
+        return `- [${status}] ${h.content} — ${h.deadline}${streakStr}`;
+      })
+      .join("\n");
+
+    return context;
+  } catch (error) {
+    console.error("getHabitContext error:", error);
+    return "";
+  }
+}
+
+// ============================================================
 // CHECK-IN HELPERS
 // ============================================================
 
@@ -602,6 +740,26 @@ function processIntents(response: string): { cleaned: string; intents: Promise<v
     cleaned = cleaned.replace(match[0], "");
   }
 
+  // [HABIT: description | FREQ: daily/weekly]
+  for (const match of response.matchAll(
+    /\[HABIT:\s*(.+?)(?:\s*\|\s*FREQ:\s*(.+?))?\]/gi
+  )) {
+    intents.push(storeHabit(match[1].trim(), match[2]?.trim() || "daily"));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [HABIT_DONE: search text]
+  for (const match of response.matchAll(/\[HABIT_DONE:\s*(.+?)\]/gi)) {
+    intents.push(completeHabit(match[1].trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [HABIT_REMOVE: search text]
+  for (const match of response.matchAll(/\[HABIT_REMOVE:\s*(.+?)\]/gi)) {
+    intents.push(removeHabit(match[1].trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
   // [SEARCH: query] — handled by callClaudeWithSearch, but clean tag if it leaks through
   cleaned = cleaned.replace(/\[SEARCH:\s*.+?\]/gi, "");
 
@@ -619,10 +777,11 @@ async function runCheckin(): Promise<void> {
   if (!CHECKIN_ENABLED) return;
 
   try {
-    const [memoryContext, calendarContext, todoContext] = await Promise.all([
+    const [memoryContext, calendarContext, todoContext, habitContext] = await Promise.all([
       getMemoryContext(),
       getCalendarContext(),
       getTodoContext(),
+      getHabitContext(),
     ]);
     const lastCheckin = await getLastCheckinTime();
 
@@ -654,15 +813,17 @@ LAST CHECK-IN: ${lastCheckinStr}
 ${memoryContext}
 ${calendarContext}
 ${todoContext}
+${habitContext}
 
 RULES:
 1. Max 2-3 check-ins per day. If you've already checked in recently, say NO.
-2. Only check in if there's a genuine REASON — a goal deadline approaching, a todo with an upcoming due date, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint (good morning, end of day).
+2. Only check in if there's a genuine REASON — a goal deadline approaching, a todo with an upcoming due date, a habit not yet done today, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint (good morning, end of day).
 3. Consider time of day. Late night or very early morning — probably NO.
 4. Be brief, warm, and helpful. Not robotic. Not annoying.
 5. If you have nothing meaningful to say, say NO.
 6. Never mention that you're an AI deciding whether to check in. Just be natural.
 7. If there are upcoming calendar events, you can mention them naturally (e.g. "heads up, you have a meeting in 30 min").
+8. If a habit hasn't been done today, you can gently nudge about it.
 
 RESPOND IN THIS EXACT FORMAT (no extra text):
 DECISION: YES or NO
@@ -1210,10 +1371,11 @@ async function buildPrompt(userMessage: string): Promise<string> {
     minute: "2-digit",
   });
 
-  const [memoryContext, calendarContext, todoContext] = await Promise.all([
+  const [memoryContext, calendarContext, todoContext, habitContext] = await Promise.all([
     getMemoryContext(),
     getCalendarContext(),
     getTodoContext(),
+    getHabitContext(),
   ]);
 
   const tagInstructions = MEMORY_ENABLED
@@ -1229,6 +1391,11 @@ Memory:
 Todos:
 - [TODO: task text | DUE: optional date] — Add a task to the user's todo list.
 - [TODO_DONE: search text] — Mark a todo as completed.
+
+Habits:
+- [HABIT: description | FREQ: daily or weekly] — Create a recurring habit to track.
+- [HABIT_DONE: search text] — Mark a habit as done for today. Maintains streak count.
+- [HABIT_REMOVE: search text] — Remove a habit the user no longer wants to track.
 
 Calendar:${CALENDAR_ENABLED ? `
 - [CALENDAR: event title | DATE: YYYY-MM-DD | TIME: HH:MM | DURATION: minutes] — Create a calendar event. Duration defaults to 60 if omitted.` : " (disabled)"}
@@ -1250,6 +1417,7 @@ Current time: ${timeStr}
 ${memoryContext}
 ${calendarContext}
 ${todoContext}
+${habitContext}
 ${tagInstructions}
 User: ${userMessage}
 `.trim();
@@ -1411,10 +1579,82 @@ if (WEBHOOK_SECRET) {
         return jsonResponse({ ok: true });
       }
 
-      // All other routes require auth
-      const auth = req.headers.get("authorization");
-      if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+      // Auth: Bearer token in header OR ?token= query param (for browser dashboard)
+      const authHeader = req.headers.get("authorization");
+      const tokenParam = url.searchParams.get("token");
+      const isAuthed =
+        authHeader === `Bearer ${WEBHOOK_SECRET}` ||
+        tokenParam === WEBHOOK_SECRET;
+
+      if (!isAuthed) {
         return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+      }
+
+      // ---- Dashboard routes (GET) ----
+      if (req.method === "GET") {
+        if (url.pathname === "/dashboard") {
+          try {
+            const html = await readFile(join(import.meta.dir, "dashboard.html"), "utf-8");
+            return new Response(html.replace("__TOKEN__", WEBHOOK_SECRET), {
+              headers: { "Content-Type": "text/html" },
+            });
+          } catch {
+            return new Response("Dashboard file not found", { status: 404 });
+          }
+        }
+
+        if (url.pathname === "/api/memory" && supabase) {
+          const [facts, goals, completedGoals] = await Promise.all([
+            supabase.from("memory").select("*").eq("type", "fact").order("created_at", { ascending: false }),
+            supabase.from("memory").select("*").eq("type", "goal").order("created_at", { ascending: false }),
+            supabase.from("memory").select("*").eq("type", "completed_goal").order("completed_at", { ascending: false }).limit(10),
+          ]);
+          return jsonResponse({ facts: facts.data, goals: goals.data, completedGoals: completedGoals.data });
+        }
+
+        if (url.pathname === "/api/todos" && supabase) {
+          const [active, completed] = await Promise.all([
+            supabase.from("memory").select("*").eq("type", "todo").order("created_at", { ascending: false }),
+            supabase.from("memory").select("*").eq("type", "completed_todo").order("completed_at", { ascending: false }).limit(10),
+          ]);
+          return jsonResponse({ active: active.data, completed: completed.data });
+        }
+
+        if (url.pathname === "/api/habits" && supabase) {
+          const { data } = await supabase.from("memory").select("*").eq("type", "habit").order("created_at", { ascending: true });
+          return jsonResponse({ habits: data });
+        }
+
+        if (url.pathname === "/api/logs" && supabase) {
+          const { data } = await supabase.from("logs").select("*").order("created_at", { ascending: false }).limit(50);
+          return jsonResponse({ logs: data });
+        }
+
+        if (url.pathname === "/api/messages" && supabase) {
+          const { data } = await supabase.from("messages").select("*").order("created_at", { ascending: false }).limit(30);
+          return jsonResponse({ messages: data });
+        }
+
+        if (url.pathname === "/api/stats" && supabase) {
+          const [facts, goals, todos, habits, messages] = await Promise.all([
+            supabase.from("memory").select("id", { count: "exact" }).eq("type", "fact"),
+            supabase.from("memory").select("id", { count: "exact" }).eq("type", "goal"),
+            supabase.from("memory").select("id", { count: "exact" }).eq("type", "todo"),
+            supabase.from("memory").select("id", { count: "exact" }).eq("type", "habit"),
+            supabase.from("messages").select("id", { count: "exact" }),
+          ]);
+          return jsonResponse({
+            facts: facts.count,
+            goals: goals.count,
+            todos: todos.count,
+            habits: habits.count,
+            messages: messages.count,
+            calendar: CALENDAR_ENABLED,
+            uptime: Math.round(process.uptime()),
+          });
+        }
+
+        return jsonResponse({ ok: false, error: "Not found" }, 404);
       }
 
       if (req.method !== "POST") {
@@ -1537,6 +1777,120 @@ async function checkUpcomingReminders(): Promise<void> {
 }
 
 // ============================================================
+// POST-MEETING DEBRIEF
+// ============================================================
+
+const debriefedEvents = new Set<string>();
+
+async function checkPostMeetingDebrief(): Promise<void> {
+  if (!CALENDAR_ENABLED || !calendarClient || !CHECKIN_ENABLED) return;
+
+  try {
+    const now = new Date();
+    const tenMinAgo = new Date(now.getTime() - 10 * 60000);
+
+    // Find events that ended in the last 10 minutes
+    const res = await calendarClient.events.list({
+      calendarId: GOOGLE_CALENDAR_ID,
+      timeMin: tenMinAgo.toISOString(),
+      timeMax: now.toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    const events = res.data.items || [];
+    for (const ev of events) {
+      const eventId = ev.id!;
+      if (debriefedEvents.has(eventId)) continue;
+
+      const end = ev.end?.dateTime ? new Date(ev.end.dateTime) : null;
+      if (!end) continue;
+
+      // Only debrief events that actually ended (not ones still running)
+      if (end.getTime() > now.getTime()) continue;
+
+      const minsAgo = Math.round((now.getTime() - end.getTime()) / 60000);
+      if (minsAgo <= 10 && minsAgo >= 0) {
+        debriefedEvents.add(eventId);
+        await sendTelegramText(
+          `How did "${ev.summary}" go? Anything worth noting or following up on?`
+        );
+        console.log(`Post-meeting debrief: ${ev.summary}`);
+      }
+    }
+  } catch (error) {
+    console.error("checkPostMeetingDebrief error:", error);
+  }
+}
+
+// ============================================================
+// END-OF-DAY RECAP
+// ============================================================
+
+const END_OF_DAY_HOUR = parseInt(process.env.END_OF_DAY_HOUR || "18", 10);
+let lastRecapDate = "";
+
+async function checkEndOfDayRecap(): Promise<void> {
+  if (!CHECKIN_ENABLED) return;
+
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const todayStr = now.toLocaleDateString("en-US", { timeZone: tz });
+  const hour = now.getHours();
+
+  if (lastRecapDate === todayStr || hour !== END_OF_DAY_HOUR) return;
+  if (now.getMinutes() > 30) return;
+
+  lastRecapDate = todayStr;
+
+  try {
+    const timeStr = now.toLocaleString("en-US", {
+      timeZone: tz,
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    const [memoryContext, todoContext, habitContext] = await Promise.all([
+      getMemoryContext(),
+      getTodoContext(),
+      getHabitContext(),
+    ]);
+
+    const prompt = `
+You are Raya. Send a brief end-of-day recap to the user via Telegram.
+
+CURRENT TIME: ${timeStr}
+${memoryContext}
+${todoContext}
+${habitContext}
+
+Include:
+- A quick summary of what was accomplished today based on conversation history
+- Any todos still pending
+- Habits done/not done today — encourage streaks
+- A warm sign-off for the evening
+- Keep it concise — 3-6 lines max
+- Be natural and encouraging
+`.trim();
+
+    console.log("Sending end-of-day recap...");
+    const response = await callClaude(prompt);
+
+    const { cleaned, intents } = processIntents(response);
+    await Promise.all(intents);
+    await storeMessage("assistant", cleaned, { source: "recap" });
+    await sendTelegramText(cleaned);
+    await logCheckin("YES", "End-of-day recap", cleaned);
+    console.log("End-of-day recap sent");
+  } catch (error) {
+    console.error("End-of-day recap error:", error);
+  }
+}
+
+// ============================================================
 // DAILY BRIEFING
 // ============================================================
 
@@ -1568,10 +1922,11 @@ async function checkDailyBriefing(): Promise<void> {
       minute: "2-digit",
     });
 
-    const [memoryContext, calendarContext, todoContext] = await Promise.all([
+    const [memoryContext, calendarContext, todoContext, habitContext] = await Promise.all([
       getMemoryContext(),
       getCalendarContext(),
       getTodoContext(),
+      getHabitContext(),
     ]);
 
     const prompt = `
@@ -1581,12 +1936,14 @@ CURRENT TIME: ${timeStr}
 ${memoryContext}
 ${calendarContext}
 ${todoContext}
+${habitContext}
 
 Include:
 - A warm, natural greeting appropriate for the day
 - Today's calendar events (if any)
 - Active todos or goals worth mentioning
-- Keep it concise — 3-6 lines max
+- Habits and current streaks — encourage keeping streaks alive
+- Keep it concise — 3-8 lines max
 - Don't list sections if there's nothing to list
 - Be natural, not robotic
 `.trim();
@@ -1618,7 +1975,10 @@ console.log(`Webhook: ${WEBHOOK_SECRET ? `enabled on port ${WEBHOOK_PORT}` : "di
 console.log(`Calendar: ${CALENDAR_ENABLED ? "enabled (read/write)" : "disabled (no service account key)"}`);
 console.log(`Web search: ${GEMINI_API_KEY ? "enabled (Gemini)" : "disabled (set GEMINI_API_KEY)"}`);
 console.log(`Todos: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
+console.log(`Habits: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
 console.log(`Daily briefing: ${CHECKIN_ENABLED ? `enabled (${DAILY_BRIEFING_HOUR}:00)` : "disabled (requires memory)"}`);
+console.log(`End-of-day recap: ${CHECKIN_ENABLED ? `enabled (${END_OF_DAY_HOUR}:00)` : "disabled (requires memory)"}`);
+console.log(`Post-meeting debrief: ${CALENDAR_ENABLED && CHECKIN_ENABLED ? "enabled" : "disabled (requires calendar + memory)"}`);
 console.log(`Reminders: ${CALENDAR_ENABLED ? "enabled (15 min before events)" : "disabled (requires calendar)"}`);
 console.log(`Check-ins: ${CHECKIN_ENABLED ? `enabled (every ${CHECKIN_INTERVAL_MINUTES} min)` : "disabled (requires memory)"}`);
 
@@ -1634,14 +1994,18 @@ bot.start({
       }, 5 * 60 * 1000);
     }
 
-    // Proactive calendar reminders: check every 5 minutes
+    // Proactive calendar reminders + post-meeting debrief: check every 5 minutes
     if (CALENDAR_ENABLED) {
       setInterval(checkUpcomingReminders, 5 * 60 * 1000);
+      if (CHECKIN_ENABLED) {
+        setInterval(checkPostMeetingDebrief, 5 * 60 * 1000);
+      }
     }
 
-    // Daily briefing: check every minute if it's briefing time
+    // Daily briefing + end-of-day recap: check every minute
     if (CHECKIN_ENABLED) {
       setInterval(checkDailyBriefing, 60 * 1000);
+      setInterval(checkEndOfDayRecap, 60 * 1000);
     }
   },
 });
