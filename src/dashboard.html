@@ -97,11 +97,6 @@
       text-transform: uppercase;
     }
 
-    .glow-line {
-      height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(99, 102, 241, 0.3), transparent);
-    }
-
     .progress-ring {
       width: 80px;
       height: 80px;
@@ -114,6 +109,71 @@
 
     .fade-in { animation: fadeIn 0.3s ease-out; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    .btn {
+      cursor: pointer;
+      padding: 0.35rem 0.75rem;
+      border-radius: 8px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      transition: all 0.2s ease;
+      border: none;
+      outline: none;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      color: white;
+    }
+    .btn-primary:hover { box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3); transform: translateY(-1px); }
+    .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+    .btn-success {
+      background: rgba(34, 197, 94, 0.15);
+      color: #22c55e;
+      border: 1px solid rgba(34, 197, 94, 0.2);
+    }
+    .btn-success:hover { background: rgba(34, 197, 94, 0.25); }
+    .btn-danger {
+      background: rgba(239, 68, 68, 0.1);
+      color: #ef4444;
+      border: 1px solid rgba(239, 68, 68, 0.15);
+    }
+    .btn-danger:hover { background: rgba(239, 68, 68, 0.2); }
+    .btn-ghost {
+      background: rgba(99, 102, 241, 0.08);
+      color: #94a3b8;
+      border: 1px solid rgba(99, 102, 241, 0.1);
+    }
+    .btn-ghost:hover { background: rgba(99, 102, 241, 0.15); color: #c7d2fe; }
+
+    .input-field {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(99, 102, 241, 0.15);
+      border-radius: 10px;
+      padding: 0.5rem 0.75rem;
+      color: #e2e8f0;
+      font-size: 0.875rem;
+      outline: none;
+      transition: border-color 0.2s;
+      width: 100%;
+    }
+    .input-field:focus { border-color: rgba(99, 102, 241, 0.4); }
+    .input-field::placeholder { color: #475569; }
+
+    .toast {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.5rem;
+      padding: 0.75rem 1.25rem;
+      border-radius: 12px;
+      font-size: 0.875rem;
+      font-weight: 500;
+      z-index: 100;
+      animation: slideUp 0.3s ease-out, fadeOut 0.3s ease-in 2.5s forwards;
+    }
+    .toast-success { background: rgba(34, 197, 94, 0.2); color: #22c55e; border: 1px solid rgba(34, 197, 94, 0.3); }
+    .toast-error { background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
+    @keyframes slideUp { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes fadeOut { to { opacity: 0; } }
 
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
@@ -137,6 +197,15 @@
     </div>
   </header>
 
+  <!-- Message Input Bar -->
+  <div class="mx-4 mt-3">
+    <div class="glass px-4 py-3 flex gap-3 items-center" style="border-radius: 12px;">
+      <input type="text" id="msg-input" class="input-field flex-1" placeholder="Talk to Raya..." onkeydown="if(event.key==='Enter')sendMessage()" />
+      <button id="msg-btn" class="btn btn-primary px-4 py-2" onclick="sendMessage()">Send</button>
+    </div>
+    <div id="msg-response" class="hidden mt-2 glass-strong p-4 text-sm text-slate-300" style="border-radius: 12px;"></div>
+  </div>
+
   <main class="max-w-6xl mx-auto px-4 py-6">
     <!-- Tabs -->
     <nav class="flex gap-2 mb-6 flex-wrap" id="tabs">
@@ -152,6 +221,9 @@
     <div id="content" class="fade-in"></div>
   </main>
 
+  <!-- Toast container -->
+  <div id="toast-container"></div>
+
   <script>
     const TOKEN = "__TOKEN__";
     const BASE = window.location.origin;
@@ -159,6 +231,23 @@
     async function api(path) {
       const res = await fetch(`${BASE}${path}?token=${TOKEN}`);
       return res.json();
+    }
+
+    async function apiPost(path, body) {
+      const res = await fetch(`${BASE}${path}?token=${TOKEN}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return res.json();
+    }
+
+    function toast(message, type = "success") {
+      const el = document.createElement("div");
+      el.className = `toast toast-${type}`;
+      el.textContent = message;
+      document.getElementById("toast-container").appendChild(el);
+      setTimeout(() => el.remove(), 3000);
     }
 
     function timeAgo(dateStr) {
@@ -202,6 +291,94 @@
       `;
     }
 
+    // ---- Send Message ----
+    async function sendMessage() {
+      const input = document.getElementById("msg-input");
+      const btn = document.getElementById("msg-btn");
+      const responseDiv = document.getElementById("msg-response");
+      const msg = input.value.trim();
+      if (!msg) return;
+
+      input.disabled = true;
+      btn.disabled = true;
+      btn.textContent = "...";
+      responseDiv.classList.remove("hidden");
+      responseDiv.innerHTML = '<div class="flex items-center gap-2"><div class="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div><span class="text-slate-500">Raya is thinking...</span></div>';
+
+      try {
+        const result = await apiPost("/api/send-message", { message: msg });
+        if (result.ok && result.response) {
+          responseDiv.innerHTML = `<div class="text-xs text-indigo-400 mb-1 font-medium">Raya</div><div class="whitespace-pre-wrap">${esc(result.response)}</div>`;
+          input.value = "";
+          toast("Message sent");
+        } else {
+          responseDiv.innerHTML = `<div class="text-red-400">${esc(result.error || "Failed to send")}</div>`;
+        }
+      } catch (err) {
+        responseDiv.innerHTML = '<div class="text-red-400">Connection error</div>';
+      }
+
+      input.disabled = false;
+      btn.disabled = false;
+      btn.textContent = "Send";
+      input.focus();
+    }
+
+    // ---- Habit Actions ----
+    async function completeHabit(id) {
+      const result = await apiPost("/api/habits/complete", { id });
+      if (result.ok) {
+        toast(result.message || `Done! Streak: ${result.streak || 1}`);
+        tabHandlers[currentTab]?.();
+      } else {
+        toast("Failed to complete habit", "error");
+      }
+    }
+
+    async function removeHabit(id, name) {
+      if (!confirm(`Remove habit "${name}"?`)) return;
+      const result = await apiPost("/api/habits/remove", { id });
+      if (result.ok) {
+        toast("Habit removed");
+        tabHandlers[currentTab]?.();
+      }
+    }
+
+    async function addHabit() {
+      const desc = document.getElementById("new-habit-input")?.value?.trim();
+      const freq = document.getElementById("new-habit-freq")?.value || "daily";
+      if (!desc) return;
+      const result = await apiPost("/api/habits/create", { description: desc, frequency: freq });
+      if (result.ok) {
+        toast("Habit added");
+        document.getElementById("new-habit-input").value = "";
+        tabHandlers[currentTab]?.();
+      }
+    }
+
+    // ---- Todo Actions ----
+    async function completeTodo(id) {
+      const result = await apiPost("/api/todos/complete", { id });
+      if (result.ok) {
+        toast("Todo completed");
+        tabHandlers[currentTab]?.();
+      }
+    }
+
+    async function addTodo() {
+      const content = document.getElementById("new-todo-input")?.value?.trim();
+      const due = document.getElementById("new-todo-due")?.value || "";
+      if (!content) return;
+      const result = await apiPost("/api/todos/create", { content, dueDate: due || undefined });
+      if (result.ok) {
+        toast("Todo added");
+        document.getElementById("new-todo-input").value = "";
+        if (document.getElementById("new-todo-due")) document.getElementById("new-todo-due").value = "";
+        tabHandlers[currentTab]?.();
+      }
+    }
+
+    // ---- Tab Renderers ----
     async function showOverview() {
       const [stats, todos, habits, msgs] = await Promise.all([
         api("/api/stats"), api("/api/todos"), api("/api/habits"), api("/api/messages"),
@@ -283,10 +460,10 @@
                   return `
                     <div class="flex items-center justify-between">
                       <div class="flex items-center gap-2 min-w-0">
-                        <div class="w-5 h-5 rounded-md flex items-center justify-center text-xs
-                          ${done ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-700/50 text-slate-600"}">
-                          ${done ? "&#10003;" : ""}
-                        </div>
+                        ${done
+                          ? `<div class="w-5 h-5 rounded-md flex items-center justify-center text-xs bg-emerald-500/20 text-emerald-400">&#10003;</div>`
+                          : `<button onclick="completeHabit('${h.id}')" class="w-5 h-5 rounded-md border-2 border-emerald-500/30 hover:bg-emerald-500/20 transition-colors cursor-pointer flex-shrink-0" title="Mark done"></button>`
+                        }
                         <span class="text-sm ${done ? "text-slate-300" : "text-slate-500"} truncate">${esc(h.content)}</span>
                       </div>
                       ${streak > 0 ? `<span class="text-xs streak-fire flex-shrink-0">${streak}d</span>` : ""}
@@ -315,7 +492,7 @@
                   </div>
                   <div class="text-xs text-slate-600 mt-1 ${m.role === "user" ? "text-right" : ""} px-1">
                     ${formatTime(m.created_at)}
-                    ${m.metadata?.source ? ` · ${m.metadata.source}` : ""}
+                    ${m.metadata?.source ? ` &middot; ${m.metadata.source}` : ""}
                   </div>
                 </div>
               </div>
@@ -383,39 +560,48 @@
       const completed = data.completed || [];
 
       document.getElementById("content").innerHTML = `
-        <div class="grid md:grid-cols-2 gap-4 fade-in">
-          <div class="glass-strong p-5">
-            <div class="flex items-center justify-between mb-4">
-              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Active</h3>
-              <span class="badge bg-amber-500/10 text-amber-400">${active.length}</span>
-            </div>
-            <div class="space-y-2.5">
-              ${active.map(t => `
-                <div class="flex items-start gap-3 p-2.5 rounded-lg bg-slate-800/30">
-                  <div class="w-5 h-5 rounded-md border-2 border-amber-500/30 flex-shrink-0 mt-0.5"></div>
-                  <div class="min-w-0">
-                    <div class="text-sm text-slate-300">${esc(t.content)}</div>
-                    ${t.deadline ? `<div class="text-xs text-amber-400/60 mt-0.5">Due: ${t.deadline}</div>` : ""}
-                  </div>
-                </div>
-              `).join("") || '<div class="text-slate-600 text-sm text-center py-4">All clear! Nothing to do.</div>'}
-            </div>
+        <div class="fade-in">
+          <!-- Add Todo Form -->
+          <div class="glass-strong p-4 mb-4 flex gap-3 items-center flex-wrap">
+            <input type="text" id="new-todo-input" class="input-field flex-1 min-w-[200px]" placeholder="Add a new todo..." onkeydown="if(event.key==='Enter')addTodo()" />
+            <input type="date" id="new-todo-due" class="input-field w-auto" style="max-width: 160px;" />
+            <button onclick="addTodo()" class="btn btn-primary px-4 py-2">Add</button>
           </div>
-          <div class="glass-strong p-5">
-            <div class="flex items-center justify-between mb-4">
-              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Completed</h3>
-              <span class="badge bg-emerald-500/10 text-emerald-400">${completed.length}</span>
-            </div>
-            <div class="space-y-2.5">
-              ${completed.map(t => `
-                <div class="flex items-start gap-3 p-2.5 rounded-lg">
-                  <div class="w-5 h-5 rounded-md bg-emerald-500/20 flex items-center justify-center text-emerald-400 text-xs flex-shrink-0 mt-0.5">&#10003;</div>
-                  <div class="min-w-0">
-                    <div class="text-sm text-slate-600 line-through">${esc(t.content)}</div>
-                    <div class="text-xs text-slate-700 mt-0.5">${timeAgo(t.completed_at)}</div>
+
+          <div class="grid md:grid-cols-2 gap-4">
+            <div class="glass-strong p-5">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Active</h3>
+                <span class="badge bg-amber-500/10 text-amber-400">${active.length}</span>
+              </div>
+              <div class="space-y-2.5">
+                ${active.map(t => `
+                  <div class="flex items-start gap-3 p-2.5 rounded-lg bg-slate-800/30 group">
+                    <button onclick="completeTodo('${t.id}')" class="w-5 h-5 rounded-md border-2 border-amber-500/30 hover:bg-emerald-500/20 hover:border-emerald-500/30 transition-colors cursor-pointer flex-shrink-0 mt-0.5" title="Complete"></button>
+                    <div class="min-w-0 flex-1">
+                      <div class="text-sm text-slate-300">${esc(t.content)}</div>
+                      ${t.deadline ? `<div class="text-xs text-amber-400/60 mt-0.5">Due: ${t.deadline}</div>` : ""}
+                    </div>
                   </div>
-                </div>
-              `).join("") || '<div class="text-slate-600 text-sm text-center py-4">None completed yet</div>'}
+                `).join("") || '<div class="text-slate-600 text-sm text-center py-4">All clear!</div>'}
+              </div>
+            </div>
+            <div class="glass-strong p-5">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Completed</h3>
+                <span class="badge bg-emerald-500/10 text-emerald-400">${completed.length}</span>
+              </div>
+              <div class="space-y-2.5">
+                ${completed.map(t => `
+                  <div class="flex items-start gap-3 p-2.5 rounded-lg">
+                    <div class="w-5 h-5 rounded-md bg-emerald-500/20 flex items-center justify-center text-emerald-400 text-xs flex-shrink-0 mt-0.5">&#10003;</div>
+                    <div class="min-w-0">
+                      <div class="text-sm text-slate-600 line-through">${esc(t.content)}</div>
+                      <div class="text-xs text-slate-700 mt-0.5">${timeAgo(t.completed_at)}</div>
+                    </div>
+                  </div>
+                `).join("") || '<div class="text-slate-600 text-sm text-center py-4">None completed yet</div>'}
+              </div>
             </div>
           </div>
         </div>
@@ -430,6 +616,16 @@
 
       document.getElementById("content").innerHTML = `
         <div class="fade-in">
+          <!-- Add Habit Form -->
+          <div class="glass-strong p-4 mb-4 flex gap-3 items-center flex-wrap">
+            <input type="text" id="new-habit-input" class="input-field flex-1 min-w-[200px]" placeholder="Add a new habit..." onkeydown="if(event.key==='Enter')addHabit()" />
+            <select id="new-habit-freq" class="input-field w-auto" style="max-width: 130px; background-color: rgba(15,23,42,0.8);">
+              <option value="daily">Daily</option>
+              <option value="weekly">Weekly</option>
+            </select>
+            <button onclick="addHabit()" class="btn btn-primary px-4 py-2">Add</button>
+          </div>
+
           <div class="glass-strong p-6 mb-4 flex items-center justify-between">
             <div>
               <h3 class="text-lg font-semibold text-white">Daily Habits</h3>
@@ -445,24 +641,27 @@
               return `
                 <div class="glass-strong p-4 flex items-center justify-between">
                   <div class="flex items-center gap-3">
-                    <div class="w-8 h-8 rounded-xl flex items-center justify-center text-sm
-                      ${isDone ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-700/50 text-slate-600"}">
-                      ${isDone ? "&#10003;" : "&#9675;"}
-                    </div>
+                    ${isDone
+                      ? `<div class="w-8 h-8 rounded-xl flex items-center justify-center text-sm bg-emerald-500/20 text-emerald-400">&#10003;</div>`
+                      : `<button onclick="completeHabit('${h.id}')" class="w-8 h-8 rounded-xl flex items-center justify-center text-sm bg-slate-700/50 text-slate-500 hover:bg-emerald-500/20 hover:text-emerald-400 transition-colors cursor-pointer" title="Mark done">&#9675;</button>`
+                    }
                     <div>
                       <div class="text-sm font-medium ${isDone ? "text-slate-200" : "text-slate-400"}">${esc(h.content)}</div>
-                      <div class="text-xs text-slate-600">${h.deadline || "daily"} ${h.updated_at ? `· Last: ${timeAgo(h.updated_at)}` : ""}</div>
+                      <div class="text-xs text-slate-600">${h.deadline || "daily"} ${h.updated_at ? `&middot; Last: ${timeAgo(h.updated_at)}` : ""}</div>
                     </div>
                   </div>
-                  <div class="text-right">
-                    ${streak > 0 ? `
-                      <div class="streak-fire text-lg font-bold">${streak}</div>
-                      <div class="text-xs text-slate-600">day streak</div>
-                    ` : '<div class="text-xs text-slate-700">No streak</div>'}
+                  <div class="flex items-center gap-3">
+                    <div class="text-right">
+                      ${streak > 0 ? `
+                        <div class="streak-fire text-lg font-bold">${streak}</div>
+                        <div class="text-xs text-slate-600">day streak</div>
+                      ` : '<div class="text-xs text-slate-700">No streak</div>'}
+                    </div>
+                    <button onclick="removeHabit('${h.id}', '${esc(h.content).replace(/'/g, "\\\'")}')" class="btn btn-danger text-xs opacity-0 group-hover:opacity-100" title="Remove">&#10005;</button>
                   </div>
                 </div>
               `;
-            }).join("") || '<div class="glass-strong p-8 text-slate-600 text-center">No habits tracked yet. Tell Raya to add one!</div>'}
+            }).join("") || '<div class="glass-strong p-8 text-slate-600 text-center">No habits tracked yet</div>'}
           </div>
         </div>
       `;
@@ -477,8 +676,8 @@
           <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">System Logs</h3>
           <div class="space-y-1">
             ${logs.map(l => {
-              const isYes = l.event?.includes("YES");
-              const isNo = l.event?.includes("NO");
+              const isYes = l.metadata?.decision === "YES";
+              const isNo = l.metadata?.decision === "NO";
               return `
                 <div class="flex items-start gap-3 py-2.5 border-b border-slate-800/50 text-sm">
                   <div class="text-xs text-slate-600 whitespace-nowrap w-32 flex-shrink-0 pt-0.5">${formatTime(l.created_at)}</div>
@@ -496,11 +695,13 @@
 
     // Tab navigation
     const tabHandlers = { overview: showOverview, messages: showMessages, memory: showMemory, todos: showTodos, habits: showHabits, logs: showLogs };
+    let currentTab = "overview";
 
     document.getElementById("tabs").addEventListener("click", (e) => {
       const tab = e.target.closest(".tab");
       if (!tab) return;
       const name = tab.dataset.tab;
+      currentTab = name;
       document.querySelectorAll(".tab").forEach(t => t.classList.remove("tab-active"));
       tab.classList.add("tab-active");
       document.getElementById("content").innerHTML = '<div class="flex justify-center py-12"><div class="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div></div>';
@@ -508,11 +709,6 @@
     });
 
     // Auto-refresh every 30 seconds
-    let currentTab = "overview";
-    document.getElementById("tabs").addEventListener("click", (e) => {
-      const tab = e.target.closest(".tab");
-      if (tab) currentTab = tab.dataset.tab;
-    });
     setInterval(() => tabHandlers[currentTab]?.(), 30000);
 
     // Load overview

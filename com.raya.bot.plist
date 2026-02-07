@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.raya.bot</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/markphaneuf/claude-telegram-relay/start.sh</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>/Users/markphaneuf/.claude-relay/logs/launchd-stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/markphaneuf/.claude-relay/logs/launchd-stderr.log</string>
+  <key>WorkingDirectory</key>
+  <string>/Users/markphaneuf/claude-telegram-relay</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/markphaneuf/.bun/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>HOME</key>
+    <string>/Users/markphaneuf</string>
+  </dict>
+</dict>
+</plist>

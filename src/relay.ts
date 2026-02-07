@@ -76,7 +76,10 @@ if (GMAIL_USER && CALENDAR_ENABLED) {
   try {
     const gmailAuth = new google.auth.JWT({
       keyFile: GOOGLE_CALENDAR_KEY_FILE,
-      scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      scopes: [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+      ],
       subject: GMAIL_USER,
     });
     gmailClients.push({ label: GMAIL_USER, client: google.gmail({ version: "v1", auth: gmailAuth }) });
@@ -113,6 +116,10 @@ const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER || "";
 const TWILIO_USER_PHONE = process.env.TWILIO_USER_PHONE || "";
 const TWILIO_PUBLIC_URL = process.env.TWILIO_PUBLIC_URL || "";
 const TWILIO_ENABLED = !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_PHONE_NUMBER && TWILIO_USER_PHONE);
+
+// Email-to-SMS gateway (bypasses 10DLC carrier blocking)
+const SMS_EMAIL_GATEWAY = process.env.SMS_EMAIL_GATEWAY
+  || (TWILIO_USER_PHONE ? `${TWILIO_USER_PHONE.replace(/^\+1/, "")}@vtext.com` : "");
 
 // Voice support
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
@@ -152,6 +159,33 @@ async function saveSession(state: SessionState): Promise<void> {
 let session = await loadSession();
 
 // ============================================================
+// CONVERSATION BUFFER (in-memory for active session)
+// ============================================================
+
+const conversationBuffer: Array<{ role: "user" | "assistant"; content: string; timestamp: Date }> = [];
+const MAX_CONV_BUFFER = 10;
+
+function addToConversationBuffer(role: "user" | "assistant", content: string) {
+  conversationBuffer.push({ role, content, timestamp: new Date() });
+  if (conversationBuffer.length > MAX_CONV_BUFFER) {
+    conversationBuffer.shift();
+  }
+}
+
+function getConversationContext(): string {
+  if (conversationBuffer.length === 0) return "";
+
+  const lines = conversationBuffer.map((m) => {
+    const truncated = m.content.length > 800
+      ? m.content.substring(0, 800) + "..."
+      : m.content;
+    return `[${m.role}]: ${truncated}`;
+  });
+
+  return `\nACTIVE CONVERSATION (current session):\n${lines.join("\n")}`;
+}
+
+// ============================================================
 // MEMORY (Supabase)
 // ============================================================
 
@@ -160,6 +194,9 @@ async function storeMessage(
   content: string,
   metadata?: Record<string, unknown>
 ): Promise<void> {
+  // Always add to in-memory conversation buffer
+  addToConversationBuffer(role, content);
+
   if (!supabase) return;
   try {
     const truncated = content.length > 10000 ? content.substring(0, 10000) : content;
@@ -240,23 +277,29 @@ async function getMemoryContext(): Promise<string> {
   if (!supabase) return "";
 
   try {
+    // Only fetch Supabase messages if conversation buffer is empty (fresh restart)
+    const needsHistory = conversationBuffer.length === 0;
+
     const [factsRes, goalsRes, messagesRes] = await Promise.all([
       supabase
         .from("memory")
         .select("content")
         .eq("type", "fact")
-        .order("created_at", { ascending: false }),
+        .order("created_at", { ascending: false })
+        .limit(20), // Limit to 20 most recent facts instead of ALL
       supabase
         .from("memory")
         .select("content, deadline")
         .eq("type", "goal")
         .order("priority", { ascending: false })
         .order("created_at", { ascending: false }),
-      supabase
-        .from("messages")
-        .select("role, content, created_at")
-        .order("created_at", { ascending: false })
-        .limit(CONTEXT_MESSAGE_COUNT),
+      needsHistory
+        ? supabase
+            .from("messages")
+            .select("role, content, created_at")
+            .order("created_at", { ascending: false })
+            .limit(CONTEXT_MESSAGE_COUNT)
+        : Promise.resolve({ data: [] as Array<{ role: string; content: string; created_at: string }> }),
     ]);
 
     let context = "";
@@ -278,6 +321,7 @@ async function getMemoryContext(): Promise<string> {
         .join("\n");
     }
 
+    // Only include Supabase history if no in-memory buffer
     const messages = messagesRes.data || [];
     if (messages.length > 0) {
       context += "\n\nRECENT CONVERSATION HISTORY (newest first):\n";
@@ -876,6 +920,40 @@ async function sendSMS(body: string, to?: string): Promise<void> {
     console.log(`SMS sent to ${recipient}: ${body.substring(0, 60)}`);
   } catch (error) {
     console.error("sendSMS error:", error);
+  }
+
+  // Also try email-to-SMS as backup (Twilio SMS often blocked by 10DLC)
+  if ((!to || to === TWILIO_USER_PHONE) && SMS_EMAIL_GATEWAY) {
+    await sendEmailSMS(body);
+  }
+}
+
+async function sendEmailSMS(body: string): Promise<void> {
+  if (!SMS_EMAIL_GATEWAY || gmailClients.length === 0) return;
+
+  try {
+    // Construct raw MIME email (SMS gateway expects plain text, <=160 chars)
+    const smsBody = body.length > 160 ? body.substring(0, 157) + "..." : body;
+    const email = [
+      `To: ${SMS_EMAIL_GATEWAY}`,
+      `From: ${GMAIL_USER || "raya@assistant.local"}`,
+      `Subject: `,
+      `Content-Type: text/plain; charset=utf-8`,
+      ``,
+      smsBody,
+    ].join("\r\n");
+
+    const raw = Buffer.from(email).toString("base64url");
+
+    await gmailClients[0].client.users.messages.send({
+      userId: "me",
+      requestBody: { raw },
+    });
+
+    console.log(`Email-to-SMS sent via ${SMS_EMAIL_GATEWAY}: ${smsBody.substring(0, 60)}`);
+  } catch (error) {
+    console.error("sendEmailSMS error:", error);
+    console.error("Hint: If 403, add gmail.send scope to domain-wide delegation in Google Workspace admin");
   }
 }
 
@@ -1788,10 +1866,13 @@ Rules:
 `
     : "";
 
+  const conversationContext = getConversationContext();
+
   return `
 ${RAYA_SYSTEM_PROMPT}
 Current time: ${timeStr}
 ${memoryContext}
+${conversationContext}
 ${calendarContext}
 ${todoContext}
 ${habitContext}
@@ -2269,6 +2350,140 @@ if (WEBHOOK_SECRET) {
         return jsonResponse({ ok: false, error: "Not found" }, 404);
       }
 
+      // ---- Dashboard mutation routes (POST, authed) ----
+      if (req.method === "POST" && url.pathname === "/api/habits/complete" && isAuthed) {
+        try {
+          const body = (await req.json()) as { id?: string; searchText?: string };
+          if (body.id && supabase) {
+            const now = new Date();
+            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            const todayStr = now.toLocaleDateString("en-US", { timeZone: tz });
+
+            // Get habit details
+            const { data: habits } = await supabase
+              .from("memory")
+              .select("id, content, priority, updated_at")
+              .eq("id", body.id)
+              .limit(1);
+
+            if (habits && habits.length > 0) {
+              const habit = habits[0];
+              const lastDone = habit.updated_at
+                ? new Date(habit.updated_at).toLocaleDateString("en-US", { timeZone: tz })
+                : "";
+
+              if (lastDone === todayStr) {
+                return jsonResponse({ ok: true, message: "Already done today" });
+              }
+
+              const yesterday = new Date(now);
+              yesterday.setDate(yesterday.getDate() - 1);
+              const yesterdayStr = yesterday.toLocaleDateString("en-US", { timeZone: tz });
+              const newStreak = lastDone === yesterdayStr ? (habit.priority || 0) + 1 : 1;
+
+              await supabase
+                .from("memory")
+                .update({ priority: newStreak, updated_at: now.toISOString() })
+                .eq("id", habit.id);
+
+              return jsonResponse({ ok: true, streak: newStreak });
+            }
+          } else if (body.searchText) {
+            await completeHabit(body.searchText);
+          }
+          return jsonResponse({ ok: true });
+        } catch (error) {
+          console.error("Habit complete error:", error);
+          return jsonResponse({ ok: false, error: "Failed" }, 500);
+        }
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/habits/remove" && isAuthed) {
+        try {
+          const body = (await req.json()) as { id: string };
+          if (body.id && supabase) {
+            await supabase.from("memory").delete().eq("id", body.id);
+          }
+          return jsonResponse({ ok: true });
+        } catch (error) {
+          console.error("Habit remove error:", error);
+          return jsonResponse({ ok: false, error: "Failed" }, 500);
+        }
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/habits/create" && isAuthed) {
+        try {
+          const body = (await req.json()) as { description: string; frequency?: string };
+          if (body.description) {
+            await storeHabit(body.description, body.frequency || "daily");
+          }
+          return jsonResponse({ ok: true });
+        } catch (error) {
+          console.error("Habit create error:", error);
+          return jsonResponse({ ok: false, error: "Failed" }, 500);
+        }
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/todos/complete" && isAuthed) {
+        try {
+          const body = (await req.json()) as { id?: string; searchText?: string };
+          if (body.id && supabase) {
+            await supabase
+              .from("memory")
+              .update({
+                type: "completed_todo",
+                completed_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", body.id);
+          } else if (body.searchText) {
+            await completeTodo(body.searchText);
+          }
+          return jsonResponse({ ok: true });
+        } catch (error) {
+          console.error("Todo complete error:", error);
+          return jsonResponse({ ok: false, error: "Failed" }, 500);
+        }
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/todos/create" && isAuthed) {
+        try {
+          const body = (await req.json()) as { content: string; dueDate?: string };
+          if (body.content) {
+            await storeTodo(body.content, body.dueDate);
+          }
+          return jsonResponse({ ok: true });
+        } catch (error) {
+          console.error("Todo create error:", error);
+          return jsonResponse({ ok: false, error: "Failed" }, 500);
+        }
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/send-message" && isAuthed) {
+        try {
+          const body = (await req.json()) as { message: string };
+          if (!body.message) {
+            return jsonResponse({ ok: false, error: "Provide a message" }, 400);
+          }
+
+          // Process through Raya like a Telegram message
+          await storeMessage("user", body.message, { source: "dashboard" });
+          const enrichedPrompt = await buildPrompt(body.message);
+          const response = await callClaudeWithSearch(enrichedPrompt, { resume: true });
+          const { cleaned, intents } = processIntents(response);
+          await Promise.all(intents);
+          await storeMessage("assistant", cleaned, { source: "dashboard" });
+
+          // Also forward to Telegram
+          sendTelegramText(`[via Dashboard] ${body.message}\n\nRaya: ${cleaned}`).catch(() => {});
+
+          return jsonResponse({ ok: true, response: cleaned });
+        } catch (error) {
+          console.error("Send message error:", error);
+          return jsonResponse({ ok: false, error: "Failed" }, 500);
+        }
+      }
+
       if (req.method !== "POST") {
         return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
       }
@@ -2465,10 +2680,11 @@ async function checkEndOfDayRecap(): Promise<void> {
       minute: "2-digit",
     });
 
-    const [memoryContext, todoContext, habitContext] = await Promise.all([
+    const [memoryContext, todoContext, habitContext, recapEmailContext] = await Promise.all([
       getMemoryContext(),
       getTodoContext(),
       getHabitContext(),
+      getEmailContext(),
     ]);
 
     const prompt = `
@@ -2479,7 +2695,7 @@ CURRENT TIME: ${timeStr}
 ${memoryContext}
 ${todoContext}
 ${habitContext}
-${emailContext}
+${recapEmailContext}
 
 Include:
 - Quick wins — what got done today based on conversation history
@@ -2603,6 +2819,7 @@ console.log(`Todos: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}
 console.log(`Habits: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
 console.log(`Gmail: ${GMAIL_ENABLED ? `enabled (${gmailClients.map(c => c.label).join(", ")})` : "disabled (set GMAIL_USER)"}`);
 console.log(`Twilio SMS: ${TWILIO_ENABLED ? `enabled (${TWILIO_PHONE_NUMBER})` : "disabled (set TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_PHONE_NUMBER + TWILIO_USER_PHONE)"}`);
+console.log(`Email-to-SMS: ${SMS_EMAIL_GATEWAY ? `enabled (${SMS_EMAIL_GATEWAY})` : "disabled"}`);
 console.log(`Daily briefing: ${CHECKIN_ENABLED ? `enabled (${DAILY_BRIEFING_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`End-of-day recap: ${CHECKIN_ENABLED ? `enabled (${END_OF_DAY_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`Post-meeting debrief: ${CALENDAR_ENABLED && CHECKIN_ENABLED ? "enabled" : "disabled (requires calendar + memory)"}`);
