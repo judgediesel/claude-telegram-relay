@@ -64,6 +64,26 @@ try {
   // Key file doesn't exist or is unreadable — calendar stays disabled
 }
 
+// Gmail
+const GMAIL_USER = process.env.GMAIL_USER || "";
+
+let GMAIL_ENABLED = false;
+let gmailClient: ReturnType<typeof google.gmail> | null = null;
+
+if (GMAIL_USER && CALENDAR_ENABLED) {
+  try {
+    const gmailAuth = new google.auth.JWT({
+      keyFile: GOOGLE_CALENDAR_KEY_FILE,
+      scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      subject: GMAIL_USER,
+    });
+    gmailClient = google.gmail({ version: "v1", auth: gmailAuth });
+    GMAIL_ENABLED = true;
+  } catch {
+    // Gmail auth failed — stays disabled
+  }
+}
+
 // Voice support
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
@@ -616,6 +636,55 @@ async function createCalendarEvent(
 }
 
 // ============================================================
+// GMAIL
+// ============================================================
+
+async function getEmailContext(): Promise<string> {
+  if (!GMAIL_ENABLED || !gmailClient) return "";
+
+  try {
+    // Fetch recent unread emails
+    const res = await gmailClient.users.messages.list({
+      userId: "me",
+      q: "is:unread -category:promotions -category:social -category:updates",
+      maxResults: 8,
+    });
+
+    const messages = res.data.messages || [];
+    if (messages.length === 0) return "";
+
+    // Fetch headers for each message
+    const details = await Promise.all(
+      messages.slice(0, 8).map(async (msg) => {
+        const detail = await gmailClient!.users.messages.get({
+          userId: "me",
+          id: msg.id!,
+          format: "metadata",
+          metadataHeaders: ["From", "Subject", "Date"],
+        });
+
+        const headers = detail.data.payload?.headers || [];
+        const from = headers.find((h) => h.name === "From")?.value || "Unknown";
+        const subject = headers.find((h) => h.name === "Subject")?.value || "(no subject)";
+        const snippet = detail.data.snippet || "";
+
+        // Clean up "From" — extract just name or email
+        const fromClean = from.replace(/<.*>/, "").trim().replace(/"/g, "") || from;
+
+        return `- From: ${fromClean} — ${subject}\n  ${snippet.substring(0, 100)}${snippet.length > 100 ? "..." : ""}`;
+      })
+    );
+
+    const totalUnread = res.data.resultSizeEstimate || messages.length;
+
+    return `\nUNREAD EMAILS (${totalUnread} total):\n${details.join("\n")}`;
+  } catch (error) {
+    console.error("getEmailContext error:", error);
+    return "";
+  }
+}
+
+// ============================================================
 // WEB SEARCH (via Gemini with Google Search grounding)
 // ============================================================
 
@@ -777,11 +846,12 @@ async function runCheckin(): Promise<void> {
   if (!CHECKIN_ENABLED) return;
 
   try {
-    const [memoryContext, calendarContext, todoContext, habitContext] = await Promise.all([
+    const [memoryContext, calendarContext, todoContext, habitContext, emailContext] = await Promise.all([
       getMemoryContext(),
       getCalendarContext(),
       getTodoContext(),
       getHabitContext(),
+      getEmailContext(),
     ]);
     const lastCheckin = await getLastCheckinTime();
 
@@ -814,10 +884,11 @@ ${memoryContext}
 ${calendarContext}
 ${todoContext}
 ${habitContext}
+${emailContext}
 
 RULES:
 1. Max 2-3 check-ins per day. If you've already checked in recently, say NO.
-2. Only check in if there's a genuine REASON — a goal deadline approaching, a todo with an upcoming due date, a habit not yet done today, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint (good morning, end of day).
+2. Only check in if there's a genuine REASON — a goal deadline approaching, a todo with an upcoming due date, a habit not yet done today, an important unread email, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint (good morning, end of day).
 3. Consider time of day. Late night or very early morning — probably NO.
 4. Be brief, warm, and helpful. Not robotic. Not annoying.
 5. If you have nothing meaningful to say, say NO.
@@ -1371,11 +1442,12 @@ async function buildPrompt(userMessage: string): Promise<string> {
     minute: "2-digit",
   });
 
-  const [memoryContext, calendarContext, todoContext, habitContext] = await Promise.all([
+  const [memoryContext, calendarContext, todoContext, habitContext, emailContext] = await Promise.all([
     getMemoryContext(),
     getCalendarContext(),
     getTodoContext(),
     getHabitContext(),
+    getEmailContext(),
   ]);
 
   const tagInstructions = MEMORY_ENABLED
@@ -1418,6 +1490,7 @@ ${memoryContext}
 ${calendarContext}
 ${todoContext}
 ${habitContext}
+${emailContext}
 ${tagInstructions}
 User: ${userMessage}
 `.trim();
@@ -1866,13 +1939,15 @@ CURRENT TIME: ${timeStr}
 ${memoryContext}
 ${todoContext}
 ${habitContext}
+${emailContext}
 
 Include:
 - A quick summary of what was accomplished today based on conversation history
 - Any todos still pending
 - Habits done/not done today — encourage streaks
+- Flag any important unread emails worth mentioning
 - A warm sign-off for the evening
-- Keep it concise — 3-6 lines max
+- Keep it concise — 3-8 lines max
 - Be natural and encouraging
 `.trim();
 
@@ -1922,11 +1997,12 @@ async function checkDailyBriefing(): Promise<void> {
       minute: "2-digit",
     });
 
-    const [memoryContext, calendarContext, todoContext, habitContext] = await Promise.all([
+    const [memoryContext, calendarContext, todoContext, habitContext, emailContext] = await Promise.all([
       getMemoryContext(),
       getCalendarContext(),
       getTodoContext(),
       getHabitContext(),
+      getEmailContext(),
     ]);
 
     const prompt = `
@@ -1937,12 +2013,14 @@ ${memoryContext}
 ${calendarContext}
 ${todoContext}
 ${habitContext}
+${emailContext}
 
 Include:
 - A warm, natural greeting appropriate for the day
 - Today's calendar events (if any)
 - Active todos or goals worth mentioning
 - Habits and current streaks — encourage keeping streaks alive
+- Flag any important unread emails worth mentioning
 - Keep it concise — 3-8 lines max
 - Don't list sections if there's nothing to list
 - Be natural, not robotic
@@ -1976,6 +2054,7 @@ console.log(`Calendar: ${CALENDAR_ENABLED ? "enabled (read/write)" : "disabled (
 console.log(`Web search: ${GEMINI_API_KEY ? "enabled (Gemini)" : "disabled (set GEMINI_API_KEY)"}`);
 console.log(`Todos: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
 console.log(`Habits: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
+console.log(`Gmail: ${GMAIL_ENABLED ? `enabled (${GMAIL_USER})` : "disabled (set GMAIL_USER)"}`);
 console.log(`Daily briefing: ${CHECKIN_ENABLED ? `enabled (${DAILY_BRIEFING_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`End-of-day recap: ${CHECKIN_ENABLED ? `enabled (${END_OF_DAY_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`Post-meeting debrief: ${CALENDAR_ENABLED && CHECKIN_ENABLED ? "enabled" : "disabled (requires calendar + memory)"}`);
