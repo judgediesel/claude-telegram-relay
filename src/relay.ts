@@ -1956,6 +1956,19 @@ if (WEBHOOK_SECRET) {
         }
       }
 
+      // Serve voice audio files (no auth — Twilio needs direct access)
+      if (req.method === "GET" && url.pathname.startsWith("/voice/") && url.pathname.endsWith(".mp3")) {
+        try {
+          const fileName = url.pathname.split("/").pop()!;
+          const filePath = join(TEMP_DIR, fileName);
+          const file = Bun.file(filePath);
+          if (await file.exists()) {
+            return new Response(file, { headers: { "Content-Type": "audio/mpeg" } });
+          }
+        } catch {}
+        return new Response("Not found", { status: 404 });
+      }
+
       // Twilio gather — process speech, respond, loop
       if (req.method === "POST" && url.pathname === "/twilio/gather" && TWILIO_ENABLED) {
         try {
@@ -1972,20 +1985,22 @@ if (WEBHOOK_SECRET) {
 
           console.log(`Voice input: ${speechResult}`);
 
+          // Store message (don't await — not needed for response)
+          storeMessage("user", speechResult, { source: "phone" }).catch(() => {});
+
           // Process through Claude
-          await storeMessage("user", speechResult, { source: "phone" });
           const enrichedPrompt = await buildPrompt(speechResult);
           const response = await callClaude(enrichedPrompt, { resume: true });
           const { cleaned, intents } = processIntents(response);
-          await Promise.all(intents);
-          await storeMessage("assistant", cleaned, { source: "phone" });
 
-          // Forward to Telegram for visibility
+          // Fire-and-forget: intents, storage, telegram forwarding
+          Promise.all(intents).catch(() => {});
+          storeMessage("assistant", cleaned, { source: "phone" }).catch(() => {});
           sendTelegramText(`[Phone call]\nMark: ${speechResult}\nRaya: ${cleaned}`).catch(() => {});
 
-          // Try ElevenLabs voice for response
+          // Generate ElevenLabs audio and serve locally via ngrok (no catbox upload)
           let twiml: string;
-          if (ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID) {
+          if (ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID && TWILIO_PUBLIC_URL) {
             try {
               const audioRes = await fetch(
                 `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
@@ -2005,33 +2020,20 @@ if (WEBHOOK_SECRET) {
 
               if (audioRes.ok) {
                 const audioBuffer = await audioRes.arrayBuffer();
-                const uploadForm = new FormData();
-                uploadForm.append("reqtype", "fileupload");
-                uploadForm.append("time", "1h");
-                uploadForm.append("fileToUpload", new Blob([audioBuffer], { type: "audio/mpeg" }), "reply.mp3");
+                const fileName = `reply-${Date.now()}.mp3`;
+                await writeFile(join(TEMP_DIR, fileName), Buffer.from(audioBuffer));
+                const audioUrl = `${TWILIO_PUBLIC_URL}/voice/${fileName}`;
 
-                const uploadRes = await fetch("https://litterbox.catbox.moe/resources/internals/api.php", {
-                  method: "POST",
-                  body: uploadForm,
-                });
+                twiml = `<Response>
+                  <Play>${escapeXml(audioUrl)}</Play>
+                  <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+                  <Say voice="Polly.Matthew">Are you still there?</Say>
+                  <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+                  <Say voice="Polly.Matthew">Okay, goodbye!</Say>
+                </Response>`;
 
-                if (uploadRes.ok) {
-                  const audioUrl = (await uploadRes.text()).trim();
-                  twiml = `<Response>
-                    <Play>${escapeXml(audioUrl)}</Play>
-                    <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
-                    <Say voice="Polly.Matthew">Are you still there?</Say>
-                    <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
-                    <Say voice="Polly.Matthew">Okay, goodbye!</Say>
-                  </Response>`;
-                } else {
-                  twiml = `<Response>
-                    <Say voice="Polly.Matthew">${escapeXml(cleaned)}</Say>
-                    <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
-                    <Say voice="Polly.Matthew">Are you still there?</Say>
-                    <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
-                  </Response>`;
-                }
+                // Clean up after 2 minutes
+                setTimeout(() => unlink(join(TEMP_DIR, fileName)).catch(() => {}), 2 * 60 * 1000);
               } else {
                 twiml = `<Response>
                   <Say voice="Polly.Matthew">${escapeXml(cleaned)}</Say>
