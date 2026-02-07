@@ -706,7 +706,7 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
 if (WEBHOOK_SECRET) {
   Bun.serve({
     port: WEBHOOK_PORT,
-    hostname: "0.0.0.0",
+    hostname: "127.0.0.1",
     async fetch(req) {
       const url = new URL(req.url);
 
@@ -725,10 +725,17 @@ if (WEBHOOK_SECRET) {
         return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
       }
 
+      let json: unknown;
+      try {
+        json = await req.json();
+      } catch {
+        return jsonResponse({ ok: false, error: "Invalid JSON" }, 400);
+      }
+
       try {
         // POST /send — forward a message (and optional files) to Telegram
         if (url.pathname === "/send") {
-          const body = (await req.json()) as { text?: string; files?: string[] };
+          const body = json as { text?: string; files?: string[] };
 
           if (!body.text && (!body.files || body.files.length === 0)) {
             return jsonResponse({ ok: false, error: "Provide text and/or files" }, 400);
@@ -759,7 +766,7 @@ if (WEBHOOK_SECRET) {
 
         // POST /ask — run prompt through Claude, send response to Telegram
         if (url.pathname === "/ask") {
-          const body = (await req.json()) as { prompt?: string };
+          const body = json as { prompt?: string };
 
           if (!body.prompt) {
             return jsonResponse({ ok: false, error: "Provide a prompt" }, 400);
