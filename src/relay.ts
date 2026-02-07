@@ -21,6 +21,10 @@ const ALLOWED_USER_ID = process.env.TELEGRAM_USER_ID || "";
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claude-relay");
 
+// Webhook HTTP server
+const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT || "3100", 10);
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "";
+
 // Voice support
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
@@ -600,6 +604,186 @@ async function sendResponse(ctx: Context, response: string): Promise<void> {
 }
 
 // ============================================================
+// TELEGRAM API HELPER (for sending without Grammy ctx)
+// ============================================================
+
+async function sendTelegram(
+  method: string,
+  body: Record<string, unknown>
+): Promise<unknown> {
+  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(`Telegram API error: ${JSON.stringify(data)}`);
+  return data;
+}
+
+async function sendTelegramFile(filePath: string): Promise<void> {
+  const ext = extname(filePath).toLowerCase();
+  let method: string;
+  let field: string;
+
+  if (IMAGE_EXTS.has(ext)) {
+    method = "sendPhoto";
+    field = "photo";
+  } else if (VIDEO_EXTS.has(ext)) {
+    method = "sendVideo";
+    field = "video";
+  } else {
+    method = "sendDocument";
+    field = "document";
+  }
+
+  const form = new FormData();
+  form.append("chat_id", ALLOWED_USER_ID);
+
+  const fileData = await readFile(filePath);
+  const fileName = filePath.split("/").pop() || "file";
+  form.append(field, new Blob([fileData]), fileName);
+
+  const res = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/${method}`, {
+    method: "POST",
+    body: form,
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(`Telegram file upload error: ${JSON.stringify(data)}`);
+}
+
+async function sendTelegramText(text: string): Promise<void> {
+  const MAX_LENGTH = 4000;
+
+  if (text.length <= MAX_LENGTH) {
+    await sendTelegram("sendMessage", { chat_id: ALLOWED_USER_ID, text });
+    return;
+  }
+
+  let remaining = text;
+  while (remaining.length > 0) {
+    if (remaining.length <= MAX_LENGTH) {
+      await sendTelegram("sendMessage", { chat_id: ALLOWED_USER_ID, text: remaining });
+      break;
+    }
+
+    let splitIndex = remaining.lastIndexOf("\n\n", MAX_LENGTH);
+    if (splitIndex === -1) splitIndex = remaining.lastIndexOf("\n", MAX_LENGTH);
+    if (splitIndex === -1) splitIndex = remaining.lastIndexOf(" ", MAX_LENGTH);
+    if (splitIndex === -1) splitIndex = MAX_LENGTH;
+
+    await sendTelegram("sendMessage", {
+      chat_id: ALLOWED_USER_ID,
+      text: remaining.substring(0, splitIndex),
+    });
+    remaining = remaining.substring(splitIndex).trim();
+  }
+}
+
+async function sendTelegramResponse(text: string): Promise<void> {
+  const { text: cleaned, files } = await extractFiles(text);
+
+  for (const filePath of files) {
+    await sendTelegramFile(filePath);
+  }
+
+  if (cleaned) {
+    await sendTelegramText(cleaned);
+  }
+}
+
+// ============================================================
+// WEBHOOK HTTP SERVER
+// ============================================================
+
+function jsonResponse(body: Record<string, unknown>, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+if (WEBHOOK_SECRET) {
+  Bun.serve({
+    port: WEBHOOK_PORT,
+    hostname: "0.0.0.0",
+    async fetch(req) {
+      const url = new URL(req.url);
+
+      // Health check — no auth required
+      if (req.method === "GET" && url.pathname === "/health") {
+        return jsonResponse({ ok: true });
+      }
+
+      // All other routes require auth
+      const auth = req.headers.get("authorization");
+      if (auth !== `Bearer ${WEBHOOK_SECRET}`) {
+        return jsonResponse({ ok: false, error: "Unauthorized" }, 401);
+      }
+
+      if (req.method !== "POST") {
+        return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
+      }
+
+      try {
+        // POST /send — forward a message (and optional files) to Telegram
+        if (url.pathname === "/send") {
+          const body = (await req.json()) as { text?: string; files?: string[] };
+
+          if (!body.text && (!body.files || body.files.length === 0)) {
+            return jsonResponse({ ok: false, error: "Provide text and/or files" }, 400);
+          }
+
+          if (body.files) {
+            for (const filePath of body.files) {
+              try {
+                const info = await stat(filePath);
+                if (!info.isFile()) continue;
+                if (info.size > MAX_FILE_SIZE) {
+                  console.log(`Webhook: file too large: ${filePath}`);
+                  continue;
+                }
+                await sendTelegramFile(filePath);
+              } catch (err) {
+                console.error(`Webhook: could not send file ${filePath}:`, err);
+              }
+            }
+          }
+
+          if (body.text) {
+            await sendTelegramText(body.text);
+          }
+
+          return jsonResponse({ ok: true });
+        }
+
+        // POST /ask — run prompt through Claude, send response to Telegram
+        if (url.pathname === "/ask") {
+          const body = (await req.json()) as { prompt?: string };
+
+          if (!body.prompt) {
+            return jsonResponse({ ok: false, error: "Provide a prompt" }, 400);
+          }
+
+          const enrichedPrompt = buildPrompt(body.prompt);
+          const response = await callClaude(enrichedPrompt, { resume: true });
+          await sendTelegramResponse(response);
+
+          return jsonResponse({ ok: true });
+        }
+
+        return jsonResponse({ ok: false, error: "Not found" }, 404);
+      } catch (err) {
+        console.error("Webhook error:", err);
+        return jsonResponse({ ok: false, error: "Internal server error" }, 500);
+      }
+    },
+  });
+
+  console.log(`Webhook server running on port ${WEBHOOK_PORT}`);
+}
+
+// ============================================================
 // START
 // ============================================================
 
@@ -607,6 +791,7 @@ console.log("Starting Claude Telegram Relay...");
 console.log(`Authorized user: ${ALLOWED_USER_ID || "ANY (not recommended)"}`);
 console.log(`Voice transcription: ${GEMINI_API_KEY ? "enabled" : "disabled (set GEMINI_API_KEY)"}`);
 console.log(`Voice replies: ${VOICE_REPLIES_ENABLED ? "enabled" : "disabled (set ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID)"}`);
+console.log(`Webhook: ${WEBHOOK_SECRET ? `enabled on port ${WEBHOOK_PORT}` : "disabled (set WEBHOOK_SECRET)"}`);
 
 bot.start({
   onStart: () => {
