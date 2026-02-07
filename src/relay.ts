@@ -11,6 +11,7 @@ import { Bot, Context, InputFile } from "grammy";
 import { spawn } from "bun";
 import { writeFile, mkdir, readFile, unlink, stat } from "fs/promises";
 import { join, extname } from "path";
+import { createClient, SupabaseClient } from "@supabase/supabase-js";
 
 // ============================================================
 // CONFIGURATION
@@ -24,6 +25,16 @@ const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claud
 // Webhook HTTP server
 const WEBHOOK_PORT = parseInt(process.env.WEBHOOK_PORT || "3100", 10);
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || "";
+
+// Memory / Supabase
+const SUPABASE_URL = process.env.SUPABASE_URL || "";
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || "";
+const MEMORY_ENABLED = !!(SUPABASE_URL && SUPABASE_ANON_KEY);
+const CONTEXT_MESSAGE_COUNT = 20;
+
+const supabase: SupabaseClient | null = MEMORY_ENABLED
+  ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
 
 // Voice support
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
@@ -61,6 +72,188 @@ async function saveSession(state: SessionState): Promise<void> {
 }
 
 let session = await loadSession();
+
+// ============================================================
+// MEMORY (Supabase)
+// ============================================================
+
+async function storeMessage(
+  role: "user" | "assistant",
+  content: string,
+  metadata?: Record<string, unknown>
+): Promise<void> {
+  if (!supabase) return;
+  try {
+    const truncated = content.length > 10000 ? content.substring(0, 10000) : content;
+    await supabase.from("messages").insert({
+      role,
+      content: truncated,
+      channel: "telegram",
+      metadata: metadata || {},
+    });
+  } catch (error) {
+    console.error("storeMessage error:", error);
+  }
+}
+
+async function storeFact(content: string): Promise<void> {
+  if (!supabase) return;
+  try {
+    // Deduplicate exact matches
+    const { data: existing } = await supabase
+      .from("memory")
+      .select("id")
+      .eq("type", "fact")
+      .eq("content", content)
+      .limit(1);
+
+    if (existing && existing.length > 0) return;
+
+    await supabase.from("memory").insert({ type: "fact", content });
+    console.log(`Stored fact: ${content.substring(0, 60)}`);
+  } catch (error) {
+    console.error("storeFact error:", error);
+  }
+}
+
+async function storeGoal(content: string, deadline?: string): Promise<void> {
+  if (!supabase) return;
+  try {
+    const row: Record<string, unknown> = { type: "goal", content };
+    if (deadline) row.deadline = deadline;
+    await supabase.from("memory").insert(row);
+    console.log(`Stored goal: ${content.substring(0, 60)}`);
+  } catch (error) {
+    console.error("storeGoal error:", error);
+  }
+}
+
+async function completeGoal(searchText: string): Promise<void> {
+  if (!supabase) return;
+  try {
+    const { data: goals } = await supabase
+      .from("memory")
+      .select("id, content")
+      .eq("type", "goal")
+      .ilike("content", `%${searchText}%`)
+      .limit(1);
+
+    if (!goals || goals.length === 0) {
+      console.log(`No goal found matching: ${searchText}`);
+      return;
+    }
+
+    await supabase
+      .from("memory")
+      .update({
+        type: "completed_goal",
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", goals[0].id);
+
+    console.log(`Completed goal: ${goals[0].content.substring(0, 60)}`);
+  } catch (error) {
+    console.error("completeGoal error:", error);
+  }
+}
+
+async function getMemoryContext(): Promise<string> {
+  if (!supabase) return "";
+
+  try {
+    const [factsRes, goalsRes, messagesRes] = await Promise.all([
+      supabase
+        .from("memory")
+        .select("content")
+        .eq("type", "fact")
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("memory")
+        .select("content, deadline")
+        .eq("type", "goal")
+        .order("priority", { ascending: false })
+        .order("created_at", { ascending: false }),
+      supabase
+        .from("messages")
+        .select("role, content, created_at")
+        .order("created_at", { ascending: false })
+        .limit(CONTEXT_MESSAGE_COUNT),
+    ]);
+
+    let context = "";
+
+    const facts = factsRes.data || [];
+    if (facts.length > 0) {
+      context += "\nPERSISTENT MEMORY (facts you know about the user):\n";
+      context += facts.map((f) => `- ${f.content}`).join("\n");
+    }
+
+    const goals = goalsRes.data || [];
+    if (goals.length > 0) {
+      context += "\n\nACTIVE GOALS:\n";
+      context += goals
+        .map((g) => {
+          const dl = g.deadline ? ` (by ${g.deadline})` : "";
+          return `- ${g.content}${dl}`;
+        })
+        .join("\n");
+    }
+
+    const messages = messagesRes.data || [];
+    if (messages.length > 0) {
+      context += "\n\nRECENT CONVERSATION HISTORY (newest first):\n";
+      context += messages
+        .map((m) => {
+          const truncated =
+            m.content.length > 300
+              ? m.content.substring(0, 300) + "..."
+              : m.content;
+          return `[${m.role}]: ${truncated}`;
+        })
+        .join("\n");
+    }
+
+    return context;
+  } catch (error) {
+    console.error("getMemoryContext error:", error);
+    return "";
+  }
+}
+
+// ============================================================
+// INTENT DETECTION
+// ============================================================
+
+function processIntents(response: string): { cleaned: string; intents: Promise<void>[] } {
+  let cleaned = response;
+  const intents: Promise<void>[] = [];
+
+  // [REMEMBER: fact text]
+  for (const match of response.matchAll(/\[REMEMBER:\s*(.+?)\]/gi)) {
+    intents.push(storeFact(match[1].trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [GOAL: goal text | DEADLINE: optional]
+  for (const match of response.matchAll(
+    /\[GOAL:\s*(.+?)(?:\s*\|\s*DEADLINE:\s*(.+?))?\]/gi
+  )) {
+    intents.push(storeGoal(match[1].trim(), match[2]?.trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [DONE: search text]
+  for (const match of response.matchAll(/\[DONE:\s*(.+?)\]/gi)) {
+    intents.push(completeGoal(match[1].trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // Clean up extra whitespace left by removed tags
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+
+  return { cleaned, intents };
+}
 
 // ============================================================
 // LOCK FILE (prevent multiple instances)
@@ -216,12 +409,16 @@ bot.on("message:text", async (ctx) => {
   console.log(`Message: ${text.substring(0, 50)}...`);
 
   await ctx.replyWithChatAction("typing");
+  storeMessage("user", text);
 
-  // Add any context you want here
-  const enrichedPrompt = buildPrompt(text);
-
+  const enrichedPrompt = await buildPrompt(text);
   const response = await callClaude(enrichedPrompt, { resume: true });
-  await sendResponse(ctx, response);
+
+  const { cleaned, intents } = processIntents(response);
+  storeMessage("assistant", cleaned);
+  await Promise.all(intents);
+
+  await sendResponse(ctx, cleaned);
 });
 
 // Voice messages
@@ -247,18 +444,23 @@ bot.on("message:voice", async (ctx) => {
     console.log(`Transcription: ${transcription.substring(0, 80)}...`);
 
     // Send to Claude
-    const enrichedPrompt = buildPrompt(`[Voice message]: ${transcription}`);
+    storeMessage("user", `[Voice message]: ${transcription}`);
+    const enrichedPrompt = await buildPrompt(`[Voice message]: ${transcription}`);
     const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
 
+    const { cleaned: cleanedVoice, intents: voiceIntents } = processIntents(claudeResponse);
+    storeMessage("assistant", cleanedVoice);
+    await Promise.all(voiceIntents);
+
     // Try voice reply if enabled
-    const voicePath = await textToVoice(claudeResponse);
+    const voicePath = await textToVoice(cleanedVoice);
     if (voicePath) {
       await ctx.replyWithVoice(new InputFile(voicePath));
       await unlink(voicePath).catch(() => {});
     }
 
     // Always send text too (voice can be hard to hear, and shows the transcription)
-    await sendResponse(ctx, `> ${transcription}\n\n${claudeResponse}`);
+    await sendResponse(ctx, `> ${transcription}\n\n${cleanedVoice}`);
   } catch (error) {
     console.error("Voice error:", error);
     await ctx.reply("Could not process voice message.");
@@ -286,12 +488,16 @@ bot.on("message:audio", async (ctx) => {
     console.log(`Transcription: ${transcription.substring(0, 80)}...`);
 
     const caption = ctx.message.caption || "[Audio file]";
-    const enrichedPrompt = buildPrompt(
-      `${caption}: ${transcription}`
-    );
+    const audioUserMsg = `${caption}: ${transcription}`;
+    storeMessage("user", audioUserMsg);
+    const enrichedPrompt = await buildPrompt(audioUserMsg);
     const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
 
-    await sendResponse(ctx, `> ${transcription}\n\n${claudeResponse}`);
+    const { cleaned: cleanedAudio, intents: audioIntents } = processIntents(claudeResponse);
+    storeMessage("assistant", cleanedAudio);
+    await Promise.all(audioIntents);
+
+    await sendResponse(ctx, `> ${transcription}\n\n${cleanedAudio}`);
   } catch (error) {
     console.error("Audio error:", error);
     await ctx.reply("Could not process audio file.");
@@ -321,14 +527,20 @@ bot.on("message:photo", async (ctx) => {
 
     // Claude Code can see images via file path
     const caption = ctx.message.caption || "Analyze this image.";
-    const prompt = `[Image: ${filePath}]\n\n${caption}`;
+    const photoUserMsg = `[Image: ${filePath}]\n\n${caption}`;
+    storeMessage("user", `[Photo] ${caption}`);
 
-    const claudeResponse = await callClaude(prompt, { resume: true });
+    const enrichedPrompt = await buildPrompt(photoUserMsg);
+    const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
 
     // Cleanup after processing
     await unlink(filePath).catch(() => {});
 
-    await sendResponse(ctx, claudeResponse);
+    const { cleaned: cleanedPhoto, intents: photoIntents } = processIntents(claudeResponse);
+    storeMessage("assistant", cleanedPhoto);
+    await Promise.all(photoIntents);
+
+    await sendResponse(ctx, cleanedPhoto);
   } catch (error) {
     console.error("Image error:", error);
     await ctx.reply("Could not process image.");
@@ -354,13 +566,19 @@ bot.on("message:document", async (ctx) => {
     await writeFile(filePath, Buffer.from(buffer));
 
     const caption = ctx.message.caption || `Analyze: ${doc.file_name}`;
-    const prompt = `[File: ${filePath}]\n\n${caption}`;
+    const docUserMsg = `[File: ${filePath}]\n\n${caption}`;
+    storeMessage("user", `[Document: ${doc.file_name}] ${caption}`);
 
-    const claudeResponse = await callClaude(prompt, { resume: true });
+    const enrichedPrompt = await buildPrompt(docUserMsg);
+    const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
 
     await unlink(filePath).catch(() => {});
 
-    await sendResponse(ctx, claudeResponse);
+    const { cleaned: cleanedDoc, intents: docIntents } = processIntents(claudeResponse);
+    storeMessage("assistant", cleanedDoc);
+    await Promise.all(docIntents);
+
+    await sendResponse(ctx, cleanedDoc);
   } catch (error) {
     console.error("Document error:", error);
     await ctx.reply("Could not process document.");
@@ -535,10 +753,7 @@ async function sendFile(ctx: Context, filePath: string): Promise<void> {
 // HELPERS
 // ============================================================
 
-function buildPrompt(userMessage: string): string {
-  // Add context to every prompt
-  // Customize this for your use case
-
+async function buildPrompt(userMessage: string): Promise<string> {
   const now = new Date();
   const timeStr = now.toLocaleString("en-US", {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -550,11 +765,30 @@ function buildPrompt(userMessage: string): string {
     minute: "2-digit",
   });
 
+  const memoryContext = await getMemoryContext();
+
+  const memoryInstructions = MEMORY_ENABLED
+    ? `
+MEMORY MANAGEMENT:
+You have persistent memory. Use these tags when appropriate — they are processed automatically and stripped before the user sees your response.
+
+- [REMEMBER: fact] — Store a genuinely useful long-term fact about the user (name, location, preferences, important context). Don't store trivia or things only relevant to the current message.
+- [GOAL: goal text | DEADLINE: optional date] — When the user explicitly sets a goal or objective. Only for real goals, not passing comments.
+- [DONE: search text] — When a previously tracked goal has been completed. Use a keyword that matches the stored goal.
+
+Rules:
+- Use tags sparingly. Most messages need zero tags.
+- Never mention these tags to the user or explain the memory system.
+- Place tags at the very end of your response, each on its own line.
+`
+    : "";
+
   return `
 You are responding via Telegram. Keep responses concise.
 
 Current time: ${timeStr}
-
+${memoryContext}
+${memoryInstructions}
 User: ${userMessage}
 `.trim();
 }
@@ -772,9 +1006,15 @@ if (WEBHOOK_SECRET) {
             return jsonResponse({ ok: false, error: "Provide a prompt" }, 400);
           }
 
-          const enrichedPrompt = buildPrompt(body.prompt);
+          storeMessage("user", body.prompt, { source: "webhook" });
+          const enrichedPrompt = await buildPrompt(body.prompt);
           const response = await callClaude(enrichedPrompt, { resume: true });
-          await sendTelegramResponse(response);
+
+          const { cleaned: cleanedAsk, intents: askIntents } = processIntents(response);
+          storeMessage("assistant", cleanedAsk, { source: "webhook" });
+          await Promise.all(askIntents);
+
+          await sendTelegramResponse(cleanedAsk);
 
           return jsonResponse({ ok: true });
         }
@@ -796,6 +1036,7 @@ if (WEBHOOK_SECRET) {
 
 console.log("Starting Claude Telegram Relay...");
 console.log(`Authorized user: ${ALLOWED_USER_ID || "ANY (not recommended)"}`);
+console.log(`Memory: ${MEMORY_ENABLED ? "enabled (Supabase)" : "disabled (set SUPABASE_URL + SUPABASE_ANON_KEY)"}`);
 console.log(`Voice transcription: ${GEMINI_API_KEY ? "enabled" : "disabled (set GEMINI_API_KEY)"}`);
 console.log(`Voice replies: ${VOICE_REPLIES_ENABLED ? "enabled" : "disabled (set ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID)"}`);
 console.log(`Webhook: ${WEBHOOK_SECRET ? `enabled on port ${WEBHOOK_PORT}` : "disabled (set WEBHOOK_SECRET)"}`);
