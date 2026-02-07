@@ -41,6 +41,9 @@ const supabase: SupabaseClient | null = MEMORY_ENABLED
 const CHECKIN_INTERVAL_MINUTES = parseInt(process.env.CHECKIN_INTERVAL_MINUTES || "30", 10);
 const CHECKIN_ENABLED = MEMORY_ENABLED; // check-ins need memory for context
 
+// Daily briefing
+const DAILY_BRIEFING_HOUR = parseInt(process.env.DAILY_BRIEFING_HOUR || "8", 10);
+
 // Google Calendar
 const GOOGLE_CALENDAR_KEY_FILE = process.env.GOOGLE_CALENDAR_KEY_FILE
   || join(RELAY_DIR, "google-service-account.json");
@@ -53,7 +56,7 @@ try {
   await stat(GOOGLE_CALENDAR_KEY_FILE);
   const auth = new google.auth.GoogleAuth({
     keyFile: GOOGLE_CALENDAR_KEY_FILE,
-    scopes: ["https://www.googleapis.com/auth/calendar.readonly"],
+    scopes: ["https://www.googleapis.com/auth/calendar"],
   });
   calendarClient = google.calendar({ version: "v3", auth });
   CALENDAR_ENABLED = true;
@@ -247,6 +250,80 @@ async function getMemoryContext(): Promise<string> {
 }
 
 // ============================================================
+// TODOS (stored in memory table with type="todo")
+// ============================================================
+
+async function storeTodo(content: string, dueDate?: string): Promise<void> {
+  if (!supabase) return;
+  try {
+    const row: Record<string, unknown> = { type: "todo", content };
+    if (dueDate) row.deadline = dueDate;
+    await supabase.from("memory").insert(row);
+    console.log(`Stored todo: ${content.substring(0, 60)}`);
+  } catch (error) {
+    console.error("storeTodo error:", error);
+  }
+}
+
+async function completeTodo(searchText: string): Promise<void> {
+  if (!supabase) return;
+  try {
+    const { data: todos } = await supabase
+      .from("memory")
+      .select("id, content")
+      .eq("type", "todo")
+      .ilike("content", `%${searchText}%`)
+      .limit(1);
+
+    if (!todos || todos.length === 0) {
+      console.log(`No todo found matching: ${searchText}`);
+      return;
+    }
+
+    await supabase
+      .from("memory")
+      .update({
+        type: "completed_todo",
+        completed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", todos[0].id);
+
+    console.log(`Completed todo: ${todos[0].content.substring(0, 60)}`);
+  } catch (error) {
+    console.error("completeTodo error:", error);
+  }
+}
+
+async function getTodoContext(): Promise<string> {
+  if (!supabase) return "";
+
+  try {
+    const { data: todos } = await supabase
+      .from("memory")
+      .select("content, deadline")
+      .eq("type", "todo")
+      .order("priority", { ascending: false })
+      .order("created_at", { ascending: false });
+
+    if (!todos || todos.length === 0) return "";
+
+    let context = "\nACTIVE TODOS:\n";
+    context += todos
+      .map((t) => {
+        const due = t.deadline ? ` (due ${t.deadline})` : "";
+        return `- ${t.content}${due}`;
+      })
+      .join("\n");
+
+    return context;
+  } catch (error) {
+    console.error("getTodoContext error:", error);
+    return "";
+  }
+}
+
+// ============================================================
 // CHECK-IN HELPERS
 // ============================================================
 
@@ -364,6 +441,105 @@ async function getCalendarContext(): Promise<string> {
   }
 }
 
+async function createCalendarEvent(
+  title: string,
+  date: string,
+  time: string,
+  durationMinutes = 60
+): Promise<void> {
+  if (!calendarClient) {
+    console.log("Calendar not connected — cannot create event");
+    return;
+  }
+
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const startDateTime = new Date(`${date}T${time}:00`);
+    const endDateTime = new Date(startDateTime.getTime() + durationMinutes * 60000);
+
+    await calendarClient.events.insert({
+      calendarId: GOOGLE_CALENDAR_ID,
+      requestBody: {
+        summary: title,
+        start: { dateTime: startDateTime.toISOString(), timeZone: tz },
+        end: { dateTime: endDateTime.toISOString(), timeZone: tz },
+      },
+    });
+
+    console.log(`Created calendar event: ${title} on ${date} at ${time}`);
+  } catch (error) {
+    console.error("createCalendarEvent error:", error);
+  }
+}
+
+// ============================================================
+// WEB SEARCH (via Gemini with Google Search grounding)
+// ============================================================
+
+async function searchWeb(query: string): Promise<string> {
+  if (!GEMINI_API_KEY) return "";
+
+  try {
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: `Search the web and provide a concise, factual summary for: ${query}`,
+                },
+              ],
+            },
+          ],
+          tools: [{ google_search: {} }],
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      console.error("Gemini search error:", response.status);
+      return "";
+    }
+
+    const data = (await response.json()) as {
+      candidates?: Array<{
+        content?: { parts?: Array<{ text?: string }> };
+      }>;
+    };
+
+    return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "";
+  } catch (error) {
+    console.error("searchWeb error:", error);
+    return "";
+  }
+}
+
+async function callClaudeWithSearch(
+  prompt: string,
+  options?: { resume?: boolean }
+): Promise<string> {
+  const response = await callClaude(prompt, options);
+
+  const searchMatch = response.match(/\[SEARCH:\s*(.+?)\]/i);
+  if (!searchMatch || !GEMINI_API_KEY) return response;
+
+  const query = searchMatch[1].trim();
+  console.log(`Search requested: ${query}`);
+  const searchResults = await searchWeb(query);
+
+  if (!searchResults) {
+    return response.replace(/\[SEARCH:\s*.+?\]/gi, "").trim();
+  }
+
+  // Re-prompt with search results
+  const searchPrompt = `${prompt}\n\nWEB SEARCH RESULTS for "${query}":\n${searchResults}\n\nIncorporate these results naturally into your response. Do NOT use [SEARCH:] tags again.`;
+  return await callClaude(searchPrompt, options);
+}
+
 // ============================================================
 // INTENT DETECTION
 // ============================================================
@@ -392,6 +568,38 @@ function processIntents(response: string): { cleaned: string; intents: Promise<v
     cleaned = cleaned.replace(match[0], "");
   }
 
+  // [TODO: task text | DUE: optional date]
+  for (const match of response.matchAll(
+    /\[TODO:\s*(.+?)(?:\s*\|\s*DUE:\s*(.+?))?\]/gi
+  )) {
+    intents.push(storeTodo(match[1].trim(), match[2]?.trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [TODO_DONE: search text]
+  for (const match of response.matchAll(/\[TODO_DONE:\s*(.+?)\]/gi)) {
+    intents.push(completeTodo(match[1].trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [CALENDAR: title | DATE: YYYY-MM-DD | TIME: HH:MM | DURATION: minutes]
+  for (const match of response.matchAll(
+    /\[CALENDAR:\s*(.+?)\s*\|\s*DATE:\s*(\d{4}-\d{2}-\d{2})\s*\|\s*TIME:\s*(\d{2}:\d{2})(?:\s*\|\s*DURATION:\s*(\d+))?\]/gi
+  )) {
+    intents.push(
+      createCalendarEvent(
+        match[1].trim(),
+        match[2].trim(),
+        match[3].trim(),
+        match[4] ? parseInt(match[4]) : 60
+      )
+    );
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [SEARCH: query] — handled by callClaudeWithSearch, but clean tag if it leaks through
+  cleaned = cleaned.replace(/\[SEARCH:\s*.+?\]/gi, "");
+
   // Clean up extra whitespace left by removed tags
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
 
@@ -406,9 +614,10 @@ async function runCheckin(): Promise<void> {
   if (!CHECKIN_ENABLED) return;
 
   try {
-    const [memoryContext, calendarContext] = await Promise.all([
+    const [memoryContext, calendarContext, todoContext] = await Promise.all([
       getMemoryContext(),
       getCalendarContext(),
+      getTodoContext(),
     ]);
     const lastCheckin = await getLastCheckinTime();
 
@@ -439,10 +648,11 @@ CURRENT TIME: ${timeStr}
 LAST CHECK-IN: ${lastCheckinStr}
 ${memoryContext}
 ${calendarContext}
+${todoContext}
 
 RULES:
 1. Max 2-3 check-ins per day. If you've already checked in recently, say NO.
-2. Only check in if there's a genuine REASON — a goal deadline approaching, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint (good morning, end of day).
+2. Only check in if there's a genuine REASON — a goal deadline approaching, a todo with an upcoming due date, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint (good morning, end of day).
 3. Consider time of day. Late night or very early morning — probably NO.
 4. Be brief, warm, and helpful. Not robotic. Not annoying.
 5. If you have nothing meaningful to say, say NO.
@@ -642,7 +852,7 @@ bot.on("message:text", async (ctx) => {
   storeMessage("user", text);
 
   const enrichedPrompt = await buildPrompt(text);
-  const response = await callClaude(enrichedPrompt, { resume: true });
+  const response = await callClaudeWithSearch(enrichedPrompt, { resume: true });
 
   const { cleaned, intents } = processIntents(response);
   storeMessage("assistant", cleaned);
@@ -676,7 +886,7 @@ bot.on("message:voice", async (ctx) => {
     // Send to Claude
     storeMessage("user", `[Voice message]: ${transcription}`);
     const enrichedPrompt = await buildPrompt(`[Voice message]: ${transcription}`);
-    const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
+    const claudeResponse = await callClaudeWithSearch(enrichedPrompt, { resume: true });
 
     const { cleaned: cleanedVoice, intents: voiceIntents } = processIntents(claudeResponse);
     storeMessage("assistant", cleanedVoice);
@@ -721,7 +931,7 @@ bot.on("message:audio", async (ctx) => {
     const audioUserMsg = `${caption}: ${transcription}`;
     storeMessage("user", audioUserMsg);
     const enrichedPrompt = await buildPrompt(audioUserMsg);
-    const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
+    const claudeResponse = await callClaudeWithSearch(enrichedPrompt, { resume: true });
 
     const { cleaned: cleanedAudio, intents: audioIntents } = processIntents(claudeResponse);
     storeMessage("assistant", cleanedAudio);
@@ -761,7 +971,7 @@ bot.on("message:photo", async (ctx) => {
     storeMessage("user", `[Photo] ${caption}`);
 
     const enrichedPrompt = await buildPrompt(photoUserMsg);
-    const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
+    const claudeResponse = await callClaudeWithSearch(enrichedPrompt, { resume: true });
 
     // Cleanup after processing
     await unlink(filePath).catch(() => {});
@@ -800,7 +1010,7 @@ bot.on("message:document", async (ctx) => {
     storeMessage("user", `[Document: ${doc.file_name}] ${caption}`);
 
     const enrichedPrompt = await buildPrompt(docUserMsg);
-    const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
+    const claudeResponse = await callClaudeWithSearch(enrichedPrompt, { resume: true });
 
     await unlink(filePath).catch(() => {});
 
@@ -995,23 +1205,35 @@ async function buildPrompt(userMessage: string): Promise<string> {
     minute: "2-digit",
   });
 
-  const [memoryContext, calendarContext] = await Promise.all([
+  const [memoryContext, calendarContext, todoContext] = await Promise.all([
     getMemoryContext(),
     getCalendarContext(),
+    getTodoContext(),
   ]);
 
-  const memoryInstructions = MEMORY_ENABLED
+  const tagInstructions = MEMORY_ENABLED
     ? `
-MEMORY MANAGEMENT:
-You have persistent memory. Use these tags when appropriate — they are processed automatically and stripped before the user sees your response.
+ACTION TAGS:
+You have persistent memory and action capabilities. Use these tags when appropriate — they are processed automatically and stripped before the user sees your response.
 
-- [REMEMBER: fact] — Store a genuinely useful long-term fact about the user (name, location, preferences, important context). Don't store trivia or things only relevant to the current message.
-- [GOAL: goal text | DEADLINE: optional date] — When the user explicitly sets a goal or objective. Only for real goals, not passing comments.
-- [DONE: search text] — When a previously tracked goal has been completed. Use a keyword that matches the stored goal.
+Memory:
+- [REMEMBER: fact] — Store a genuinely useful long-term fact about the user.
+- [GOAL: goal text | DEADLINE: optional date] — When the user explicitly sets a goal.
+- [DONE: search text] — When a previously tracked goal has been completed.
+
+Todos:
+- [TODO: task text | DUE: optional date] — Add a task to the user's todo list.
+- [TODO_DONE: search text] — Mark a todo as completed.
+
+Calendar:${CALENDAR_ENABLED ? `
+- [CALENDAR: event title | DATE: YYYY-MM-DD | TIME: HH:MM | DURATION: minutes] — Create a calendar event. Duration defaults to 60 if omitted.` : " (disabled)"}
+
+Web Search:${GEMINI_API_KEY ? `
+- [SEARCH: query] — Search the web for current information. Use when asked about news, weather, prices, current events, or anything you don't know.` : " (disabled)"}
 
 Rules:
 - Use tags sparingly. Most messages need zero tags.
-- Never mention these tags to the user or explain the memory system.
+- Never mention these tags to the user or explain the system.
 - Place tags at the very end of your response, each on its own line.
 `
     : "";
@@ -1022,7 +1244,8 @@ You are responding via Telegram. Keep responses concise.
 Current time: ${timeStr}
 ${memoryContext}
 ${calendarContext}
-${memoryInstructions}
+${todoContext}
+${tagInstructions}
 User: ${userMessage}
 `.trim();
 }
@@ -1242,7 +1465,7 @@ if (WEBHOOK_SECRET) {
 
           storeMessage("user", body.prompt, { source: "webhook" });
           const enrichedPrompt = await buildPrompt(body.prompt);
-          const response = await callClaude(enrichedPrompt, { resume: true });
+          const response = await callClaudeWithSearch(enrichedPrompt, { resume: true });
 
           const { cleaned: cleanedAsk, intents: askIntents } = processIntents(response);
           storeMessage("assistant", cleanedAsk, { source: "webhook" });
@@ -1265,6 +1488,119 @@ if (WEBHOOK_SECRET) {
 }
 
 // ============================================================
+// PROACTIVE CALENDAR REMINDERS
+// ============================================================
+
+const remindedEvents = new Set<string>();
+
+async function checkUpcomingReminders(): Promise<void> {
+  if (!CALENDAR_ENABLED || !calendarClient) return;
+
+  try {
+    const now = new Date();
+    const soon = new Date(now.getTime() + 15 * 60000); // 15 min from now
+
+    const res = await calendarClient.events.list({
+      calendarId: GOOGLE_CALENDAR_ID,
+      timeMin: now.toISOString(),
+      timeMax: soon.toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+    });
+
+    const events = res.data.items || [];
+    for (const ev of events) {
+      const eventId = ev.id!;
+      if (remindedEvents.has(eventId)) continue;
+
+      const start = ev.start?.dateTime ? new Date(ev.start.dateTime) : null;
+      if (!start) continue;
+
+      const minsUntil = Math.round((start.getTime() - now.getTime()) / 60000);
+      if (minsUntil <= 15 && minsUntil > 0) {
+        remindedEvents.add(eventId);
+        const location = ev.location ? ` at ${ev.location}` : "";
+        await sendTelegramText(
+          `Heads up — "${ev.summary}" starts in ${minsUntil} minute${minsUntil === 1 ? "" : "s"}${location}`
+        );
+        console.log(`Reminder sent: ${ev.summary} in ${minsUntil} min`);
+      }
+    }
+  } catch (error) {
+    console.error("checkUpcomingReminders error:", error);
+  }
+}
+
+// ============================================================
+// DAILY BRIEFING
+// ============================================================
+
+let lastBriefingDate = "";
+
+async function checkDailyBriefing(): Promise<void> {
+  if (!CHECKIN_ENABLED) return; // needs memory for context
+
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const todayStr = now.toLocaleDateString("en-US", { timeZone: tz });
+  const hour = now.getHours();
+
+  // Already sent today, or not briefing hour yet
+  if (lastBriefingDate === todayStr || hour !== DAILY_BRIEFING_HOUR) return;
+
+  // Only send within the first 30 min of the hour
+  if (now.getMinutes() > 30) return;
+
+  lastBriefingDate = todayStr;
+
+  try {
+    const timeStr = now.toLocaleString("en-US", {
+      timeZone: tz,
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    const [memoryContext, calendarContext, todoContext] = await Promise.all([
+      getMemoryContext(),
+      getCalendarContext(),
+      getTodoContext(),
+    ]);
+
+    const prompt = `
+You are Raya. Send a brief, warm morning briefing to the user via Telegram.
+
+CURRENT TIME: ${timeStr}
+${memoryContext}
+${calendarContext}
+${todoContext}
+
+Include:
+- A warm, natural greeting appropriate for the day
+- Today's calendar events (if any)
+- Active todos or goals worth mentioning
+- Keep it concise — 3-6 lines max
+- Don't list sections if there's nothing to list
+- Be natural, not robotic
+`.trim();
+
+    console.log("Sending daily briefing...");
+    const response = await callClaude(prompt);
+
+    const { cleaned, intents } = processIntents(response);
+    await Promise.all(intents);
+    await storeMessage("assistant", cleaned, { source: "briefing" });
+    await sendTelegramText(cleaned);
+    await logCheckin("YES", "Daily briefing", cleaned);
+    console.log("Daily briefing sent");
+  } catch (error) {
+    console.error("Daily briefing error:", error);
+  }
+}
+
+// ============================================================
 // START
 // ============================================================
 
@@ -1274,7 +1610,11 @@ console.log(`Memory: ${MEMORY_ENABLED ? "enabled (Supabase)" : "disabled (set SU
 console.log(`Voice transcription: ${GEMINI_API_KEY ? "enabled" : "disabled (set GEMINI_API_KEY)"}`);
 console.log(`Voice replies: ${VOICE_REPLIES_ENABLED ? "enabled" : "disabled (set ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID)"}`);
 console.log(`Webhook: ${WEBHOOK_SECRET ? `enabled on port ${WEBHOOK_PORT}` : "disabled (set WEBHOOK_SECRET)"}`);
-console.log(`Calendar: ${CALENDAR_ENABLED ? "enabled (Google)" : "disabled (no service account key)"}`);
+console.log(`Calendar: ${CALENDAR_ENABLED ? "enabled (read/write)" : "disabled (no service account key)"}`);
+console.log(`Web search: ${GEMINI_API_KEY ? "enabled (Gemini)" : "disabled (set GEMINI_API_KEY)"}`);
+console.log(`Todos: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
+console.log(`Daily briefing: ${CHECKIN_ENABLED ? `enabled (${DAILY_BRIEFING_HOUR}:00)` : "disabled (requires memory)"}`);
+console.log(`Reminders: ${CALENDAR_ENABLED ? "enabled (15 min before events)" : "disabled (requires calendar)"}`);
 console.log(`Check-ins: ${CHECKIN_ENABLED ? `enabled (every ${CHECKIN_INTERVAL_MINUTES} min)` : "disabled (requires memory)"}`);
 
 bot.start({
@@ -1287,6 +1627,16 @@ bot.start({
         runCheckin();
         setInterval(runCheckin, CHECKIN_INTERVAL_MINUTES * 60 * 1000);
       }, 5 * 60 * 1000);
+    }
+
+    // Proactive calendar reminders: check every 5 minutes
+    if (CALENDAR_ENABLED) {
+      setInterval(checkUpcomingReminders, 5 * 60 * 1000);
+    }
+
+    // Daily briefing: check every minute if it's briefing time
+    if (CHECKIN_ENABLED) {
+      setInterval(checkDailyBriefing, 60 * 1000);
     }
   },
 });
