@@ -36,6 +36,10 @@ const supabase: SupabaseClient | null = MEMORY_ENABLED
   ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
   : null;
 
+// Scheduled check-ins
+const CHECKIN_INTERVAL_MINUTES = parseInt(process.env.CHECKIN_INTERVAL_MINUTES || "30", 10);
+const CHECKIN_ENABLED = MEMORY_ENABLED; // check-ins need memory for context
+
 // Voice support
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
@@ -222,6 +226,46 @@ async function getMemoryContext(): Promise<string> {
 }
 
 // ============================================================
+// CHECK-IN HELPERS
+// ============================================================
+
+async function logCheckin(
+  decision: string,
+  reason: string,
+  message?: string
+): Promise<void> {
+  if (!supabase) return;
+  try {
+    await supabase.from("logs").insert({
+      event: "checkin",
+      level: "info",
+      message: message || reason,
+      metadata: { decision, reason },
+    });
+  } catch (error) {
+    console.error("logCheckin error:", error);
+  }
+}
+
+async function getLastCheckinTime(): Promise<string | null> {
+  if (!supabase) return null;
+  try {
+    const { data } = await supabase
+      .from("logs")
+      .select("created_at")
+      .eq("event", "checkin")
+      .contains("metadata", { decision: "YES" })
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    return data?.[0]?.created_at ?? null;
+  } catch (error) {
+    console.error("getLastCheckinTime error:", error);
+    return null;
+  }
+}
+
+// ============================================================
 // INTENT DETECTION
 // ============================================================
 
@@ -253,6 +297,88 @@ function processIntents(response: string): { cleaned: string; intents: Promise<v
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
 
   return { cleaned, intents };
+}
+
+// ============================================================
+// SCHEDULED CHECK-INS
+// ============================================================
+
+async function runCheckin(): Promise<void> {
+  if (!CHECKIN_ENABLED) return;
+
+  try {
+    const memoryContext = await getMemoryContext();
+    const lastCheckin = await getLastCheckinTime();
+
+    const now = new Date();
+    const timeStr = now.toLocaleString("en-US", {
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+    const lastCheckinStr = lastCheckin
+      ? new Date(lastCheckin).toLocaleString("en-US", {
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          weekday: "short",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "Never";
+
+    const prompt = `
+You are Raya, a proactive AI assistant. You are considering whether to send a check-in message to the user via Telegram.
+
+CURRENT TIME: ${timeStr}
+LAST CHECK-IN: ${lastCheckinStr}
+${memoryContext}
+
+RULES:
+1. Max 2-3 check-ins per day. If you've already checked in recently, say NO.
+2. Only check in if there's a genuine REASON — a goal deadline approaching, it's been a long time since last contact, a meaningful follow-up, or a natural time-of-day touchpoint (good morning, end of day).
+3. Consider time of day. Late night or very early morning — probably NO.
+4. Be brief, warm, and helpful. Not robotic. Not annoying.
+5. If you have nothing meaningful to say, say NO.
+6. Never mention that you're an AI deciding whether to check in. Just be natural.
+
+RESPOND IN THIS EXACT FORMAT (no extra text):
+DECISION: YES or NO
+REASON: [Why you decided this — one sentence]
+MESSAGE: [Your message to the user if YES, or "none" if NO]
+`.trim();
+
+    console.log("Running scheduled check-in evaluation...");
+    const response = await callClaude(prompt);
+
+    // Parse structured response
+    const decisionMatch = response.match(/DECISION:\s*(YES|NO)/i);
+    const reasonMatch = response.match(/REASON:\s*(.+?)(?=\nMESSAGE:)/is);
+    const messageMatch = response.match(/MESSAGE:\s*(.+)/is);
+
+    const decision = decisionMatch?.[1]?.toUpperCase() || "NO";
+    const reason = reasonMatch?.[1]?.trim() || "Could not parse reason";
+    const message = messageMatch?.[1]?.trim() || "";
+
+    console.log(`Check-in decision: ${decision} — ${reason}`);
+
+    if (decision === "YES" && message && message.toLowerCase() !== "none") {
+      const { cleaned, intents } = processIntents(message);
+      await Promise.all(intents);
+      await storeMessage("assistant", cleaned, { source: "checkin" });
+      await sendTelegramText(cleaned);
+      await logCheckin("YES", reason, cleaned);
+      console.log(`Check-in sent: ${cleaned.substring(0, 80)}...`);
+    } else {
+      await logCheckin("NO", reason);
+    }
+  } catch (error) {
+    console.error("runCheckin error:", error);
+    // Never crash the bot — just log and continue
+  }
 }
 
 // ============================================================
@@ -1040,9 +1166,18 @@ console.log(`Memory: ${MEMORY_ENABLED ? "enabled (Supabase)" : "disabled (set SU
 console.log(`Voice transcription: ${GEMINI_API_KEY ? "enabled" : "disabled (set GEMINI_API_KEY)"}`);
 console.log(`Voice replies: ${VOICE_REPLIES_ENABLED ? "enabled" : "disabled (set ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID)"}`);
 console.log(`Webhook: ${WEBHOOK_SECRET ? `enabled on port ${WEBHOOK_PORT}` : "disabled (set WEBHOOK_SECRET)"}`);
+console.log(`Check-ins: ${CHECKIN_ENABLED ? `enabled (every ${CHECKIN_INTERVAL_MINUTES} min)` : "disabled (requires memory)"}`);
 
 bot.start({
   onStart: () => {
     console.log("Bot is running!");
+
+    // Schedule check-ins: initial 5-minute delay, then recurring interval
+    if (CHECKIN_ENABLED) {
+      setTimeout(() => {
+        runCheckin();
+        setInterval(runCheckin, CHECKIN_INTERVAL_MINUTES * 60 * 1000);
+      }, 5 * 60 * 1000);
+    }
   },
 });
