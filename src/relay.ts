@@ -9,8 +9,8 @@
 
 import { Bot, Context, InputFile } from "grammy";
 import { spawn } from "bun";
-import { writeFile, mkdir, readFile, unlink } from "fs/promises";
-import { join } from "path";
+import { writeFile, mkdir, readFile, unlink, stat } from "fs/promises";
+import { join, extname } from "path";
 
 // ============================================================
 // CONFIGURATION
@@ -478,6 +478,56 @@ async function textToVoice(text: string): Promise<string | null> {
 }
 
 // ============================================================
+// FILE EXTRACTION & SENDING
+// ============================================================
+
+const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"]);
+const VIDEO_EXTS = new Set([".mp4", ".mov", ".webm", ".avi", ".mkv"]);
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // Telegram's 50MB limit
+
+async function extractFiles(text: string): Promise<{ text: string; files: string[] }> {
+  // Match absolute file paths — /path/to/file.ext
+  const pathRegex = /(?:^|\s)(\/[\w./-]+\.\w+)/g;
+  const files: string[] = [];
+  let cleaned = text;
+
+  for (const match of text.matchAll(pathRegex)) {
+    const filePath = match[1];
+    try {
+      const info = await stat(filePath);
+      if (!info.isFile()) continue;
+      if (info.size > MAX_FILE_SIZE) {
+        console.log(`File too large for Telegram (${info.size} bytes): ${filePath}`);
+        continue;
+      }
+      files.push(filePath);
+      // Remove the file path from the text
+      cleaned = cleaned.replace(filePath, "").replace(/\n{3,}/g, "\n\n");
+    } catch {
+      // Path doesn't exist on disk — leave text as-is
+    }
+  }
+
+  return { text: cleaned.trim(), files };
+}
+
+async function sendFile(ctx: Context, filePath: string): Promise<void> {
+  const ext = extname(filePath).toLowerCase();
+
+  try {
+    if (IMAGE_EXTS.has(ext)) {
+      await ctx.replyWithPhoto(new InputFile(filePath));
+    } else if (VIDEO_EXTS.has(ext)) {
+      await ctx.replyWithVideo(new InputFile(filePath));
+    } else {
+      await ctx.replyWithDocument(new InputFile(filePath));
+    }
+  } catch (error) {
+    console.error(`Failed to send file ${filePath}:`, error);
+  }
+}
+
+// ============================================================
 // HELPERS
 // ============================================================
 
@@ -506,17 +556,27 @@ User: ${userMessage}
 }
 
 async function sendResponse(ctx: Context, response: string): Promise<void> {
+  // Extract and send any file attachments first
+  const { text: cleanedText, files } = await extractFiles(response);
+
+  for (const filePath of files) {
+    await sendFile(ctx, filePath);
+  }
+
+  // Send text response (skip if empty after file extraction)
+  if (!cleanedText) return;
+
   // Telegram has a 4096 character limit
   const MAX_LENGTH = 4000;
 
-  if (response.length <= MAX_LENGTH) {
-    await ctx.reply(response);
+  if (cleanedText.length <= MAX_LENGTH) {
+    await ctx.reply(cleanedText);
     return;
   }
 
   // Split long responses
   const chunks = [];
-  let remaining = response;
+  let remaining = cleanedText;
 
   while (remaining.length > 0) {
     if (remaining.length <= MAX_LENGTH) {
