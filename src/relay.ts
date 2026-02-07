@@ -113,13 +113,10 @@ try {
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER || "";
+const TWILIO_SMS_NUMBER = process.env.TWILIO_SMS_NUMBER || ""; // Toll-free for SMS (bypasses 10DLC)
 const TWILIO_USER_PHONE = process.env.TWILIO_USER_PHONE || "";
 const TWILIO_PUBLIC_URL = process.env.TWILIO_PUBLIC_URL || "";
 const TWILIO_ENABLED = !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_PHONE_NUMBER && TWILIO_USER_PHONE);
-
-// Email-to-SMS gateway (bypasses 10DLC carrier blocking)
-const SMS_EMAIL_GATEWAY = process.env.SMS_EMAIL_GATEWAY
-  || (TWILIO_USER_PHONE ? `${TWILIO_USER_PHONE.replace(/^\+1/, "")}@vtext.com` : "");
 
 // Voice support
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
@@ -890,71 +887,13 @@ async function callClaudeWithSearch(
 // TWILIO SMS / VOICE
 // ============================================================
 
+// SMS is blocked until toll-free verification is approved.
+// Route all SMS through voice call for now.
+// TODO: Re-enable SMS once toll-free number is verified on Twilio.
 async function sendSMS(body: string, to?: string): Promise<void> {
   if (!TWILIO_ENABLED) return;
-
-  const recipient = to || TWILIO_USER_PHONE;
-  try {
-    const res = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Basic ${btoa(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`)}`,
-          "Content-Type": "application/x-www-form-urlencoded",
-        },
-        body: new URLSearchParams({
-          From: TWILIO_PHONE_NUMBER,
-          To: recipient,
-          Body: body,
-        }),
-      }
-    );
-
-    if (!res.ok) {
-      const err = await res.text();
-      console.error("Twilio SMS error:", err);
-      return;
-    }
-
-    console.log(`SMS sent to ${recipient}: ${body.substring(0, 60)}`);
-  } catch (error) {
-    console.error("sendSMS error:", error);
-  }
-
-  // Also try email-to-SMS as backup (Twilio SMS often blocked by 10DLC)
-  if ((!to || to === TWILIO_USER_PHONE) && SMS_EMAIL_GATEWAY) {
-    await sendEmailSMS(body);
-  }
-}
-
-async function sendEmailSMS(body: string): Promise<void> {
-  if (!SMS_EMAIL_GATEWAY || gmailClients.length === 0) return;
-
-  try {
-    // Construct raw MIME email (SMS gateway expects plain text, <=160 chars)
-    const smsBody = body.length > 160 ? body.substring(0, 157) + "..." : body;
-    const email = [
-      `To: ${SMS_EMAIL_GATEWAY}`,
-      `From: ${GMAIL_USER || "raya@assistant.local"}`,
-      `Subject: `,
-      `Content-Type: text/plain; charset=utf-8`,
-      ``,
-      smsBody,
-    ].join("\r\n");
-
-    const raw = Buffer.from(email).toString("base64url");
-
-    await gmailClients[0].client.users.messages.send({
-      userId: "me",
-      requestBody: { raw },
-    });
-
-    console.log(`Email-to-SMS sent via ${SMS_EMAIL_GATEWAY}: ${smsBody.substring(0, 60)}`);
-  } catch (error) {
-    console.error("sendEmailSMS error:", error);
-    console.error("Hint: If 403, add gmail.send scope to domain-wide delegation in Google Workspace admin");
-  }
+  console.log("SMS unavailable (toll-free unverified), routing to voice call");
+  await makeCall(body, to);
 }
 
 async function makeCall(message: string, to?: string): Promise<void> {
@@ -2818,8 +2757,8 @@ console.log(`Web search: ${GEMINI_API_KEY ? "enabled (Gemini)" : "disabled (set 
 console.log(`Todos: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
 console.log(`Habits: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
 console.log(`Gmail: ${GMAIL_ENABLED ? `enabled (${gmailClients.map(c => c.label).join(", ")})` : "disabled (set GMAIL_USER)"}`);
-console.log(`Twilio SMS: ${TWILIO_ENABLED ? `enabled (${TWILIO_PHONE_NUMBER})` : "disabled (set TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_PHONE_NUMBER + TWILIO_USER_PHONE)"}`);
-console.log(`Email-to-SMS: ${SMS_EMAIL_GATEWAY ? `enabled (${SMS_EMAIL_GATEWAY})` : "disabled"}`);
+console.log(`Twilio SMS: ${TWILIO_ENABLED ? `enabled (${TWILIO_SMS_NUMBER || TWILIO_PHONE_NUMBER})` : "disabled (set TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_PHONE_NUMBER + TWILIO_USER_PHONE)"}`);
+console.log(`Twilio Voice: ${TWILIO_ENABLED ? `enabled (${TWILIO_PHONE_NUMBER})` : "disabled"}`);
 console.log(`Daily briefing: ${CHECKIN_ENABLED ? `enabled (${DAILY_BRIEFING_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`End-of-day recap: ${CHECKIN_ENABLED ? `enabled (${END_OF_DAY_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`Post-meeting debrief: ${CALENDAR_ENABLED && CHECKIN_ENABLED ? "enabled" : "disabled (requires calendar + memory)"}`);
