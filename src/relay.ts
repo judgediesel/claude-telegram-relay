@@ -454,15 +454,20 @@ async function createCalendarEvent(
 
   try {
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const startDateTime = new Date(`${date}T${time}:00`);
-    const endDateTime = new Date(startDateTime.getTime() + durationMinutes * 60000);
+
+    // Build end time by adding duration to start
+    const [hh, mm] = time.split(":").map(Number);
+    const totalMin = hh * 60 + mm + durationMinutes;
+    const endHH = String(Math.floor(totalMin / 60) % 24).padStart(2, "0");
+    const endMM = String(totalMin % 60).padStart(2, "0");
+    const endTime = `${endHH}:${endMM}`;
 
     await calendarClient.events.insert({
       calendarId: GOOGLE_CALENDAR_ID,
       requestBody: {
         summary: title,
-        start: { dateTime: startDateTime.toISOString(), timeZone: tz },
-        end: { dateTime: endDateTime.toISOString(), timeZone: tz },
+        start: { dateTime: `${date}T${time}:00`, timeZone: tz },
+        end: { dateTime: `${date}T${endTime}:00`, timeZone: tz },
       },
     });
 
