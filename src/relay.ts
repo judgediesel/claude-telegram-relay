@@ -64,12 +64,14 @@ try {
   // Key file doesn't exist or is unreadable — calendar stays disabled
 }
 
-// Gmail
+// Gmail — supports multiple accounts
 const GMAIL_USER = process.env.GMAIL_USER || "";
+const GMAIL_OAUTH_TOKEN_FILE = join(RELAY_DIR, "gmail-oauth-token.json");
 
 let GMAIL_ENABLED = false;
-let gmailClient: ReturnType<typeof google.gmail> | null = null;
+const gmailClients: Array<{ label: string; client: ReturnType<typeof google.gmail> }> = [];
 
+// Workspace Gmail via service account
 if (GMAIL_USER && CALENDAR_ENABLED) {
   try {
     const gmailAuth = new google.auth.JWT({
@@ -77,11 +79,31 @@ if (GMAIL_USER && CALENDAR_ENABLED) {
       scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
       subject: GMAIL_USER,
     });
-    gmailClient = google.gmail({ version: "v1", auth: gmailAuth });
+    gmailClients.push({ label: GMAIL_USER, client: google.gmail({ version: "v1", auth: gmailAuth }) });
     GMAIL_ENABLED = true;
   } catch {
-    // Gmail auth failed — stays disabled
+    // Workspace Gmail auth failed
   }
+}
+
+// Personal Gmail via OAuth refresh token
+try {
+  const tokenData = JSON.parse(await readFile(GMAIL_OAUTH_TOKEN_FILE, "utf-8"));
+  if (tokenData.refresh_token) {
+    const oauth2 = new google.auth.OAuth2(
+      tokenData.client_id,
+      tokenData.client_secret
+    );
+    oauth2.setCredentials({ refresh_token: tokenData.refresh_token });
+    const personalGmail = google.gmail({ version: "v1", auth: oauth2 });
+    // Get the email address for this account
+    const profile = await personalGmail.users.getProfile({ userId: "me" });
+    const personalEmail = profile.data.emailAddress || "personal";
+    gmailClients.push({ label: personalEmail, client: personalGmail });
+    GMAIL_ENABLED = true;
+  }
+} catch {
+  // Personal Gmail token not found or invalid
 }
 
 // Voice support
@@ -640,48 +662,50 @@ async function createCalendarEvent(
 // ============================================================
 
 async function getEmailContext(): Promise<string> {
-  if (!GMAIL_ENABLED || !gmailClient) return "";
+  if (!GMAIL_ENABLED || gmailClients.length === 0) return "";
 
-  try {
-    // Fetch recent unread emails
-    const res = await gmailClient.users.messages.list({
-      userId: "me",
-      q: "is:unread -category:promotions -category:social -category:updates",
-      maxResults: 8,
-    });
+  const sections: string[] = [];
 
-    const messages = res.data.messages || [];
-    if (messages.length === 0) return "";
+  for (const { label, client } of gmailClients) {
+    try {
+      const res = await client.users.messages.list({
+        userId: "me",
+        q: "is:unread -category:promotions -category:social -category:updates",
+        maxResults: 5,
+      });
 
-    // Fetch headers for each message
-    const details = await Promise.all(
-      messages.slice(0, 8).map(async (msg) => {
-        const detail = await gmailClient!.users.messages.get({
-          userId: "me",
-          id: msg.id!,
-          format: "metadata",
-          metadataHeaders: ["From", "Subject", "Date"],
-        });
+      const messages = res.data.messages || [];
+      if (messages.length === 0) continue;
 
-        const headers = detail.data.payload?.headers || [];
-        const from = headers.find((h) => h.name === "From")?.value || "Unknown";
-        const subject = headers.find((h) => h.name === "Subject")?.value || "(no subject)";
-        const snippet = detail.data.snippet || "";
+      const details = await Promise.all(
+        messages.slice(0, 5).map(async (msg) => {
+          const detail = await client.users.messages.get({
+            userId: "me",
+            id: msg.id!,
+            format: "metadata",
+            metadataHeaders: ["From", "Subject", "Date"],
+          });
 
-        // Clean up "From" — extract just name or email
-        const fromClean = from.replace(/<.*>/, "").trim().replace(/"/g, "") || from;
+          const headers = detail.data.payload?.headers || [];
+          const from = headers.find((h) => h.name === "From")?.value || "Unknown";
+          const subject = headers.find((h) => h.name === "Subject")?.value || "(no subject)";
+          const snippet = detail.data.snippet || "";
 
-        return `- From: ${fromClean} — ${subject}\n  ${snippet.substring(0, 100)}${snippet.length > 100 ? "..." : ""}`;
-      })
-    );
+          const fromClean = from.replace(/<.*>/, "").trim().replace(/"/g, "") || from;
 
-    const totalUnread = res.data.resultSizeEstimate || messages.length;
+          return `- From: ${fromClean} — ${subject}\n  ${snippet.substring(0, 100)}${snippet.length > 100 ? "..." : ""}`;
+        })
+      );
 
-    return `\nUNREAD EMAILS (${totalUnread} total):\n${details.join("\n")}`;
-  } catch (error) {
-    console.error("getEmailContext error:", error);
-    return "";
+      const totalUnread = res.data.resultSizeEstimate || messages.length;
+      sections.push(`${label} (${totalUnread} unread):\n${details.join("\n")}`);
+    } catch (error) {
+      console.error(`getEmailContext error (${label}):`, error);
+    }
   }
+
+  if (sections.length === 0) return "";
+  return `\nUNREAD EMAILS:\n${sections.join("\n\n")}`;
 }
 
 // ============================================================
@@ -2054,7 +2078,7 @@ console.log(`Calendar: ${CALENDAR_ENABLED ? "enabled (read/write)" : "disabled (
 console.log(`Web search: ${GEMINI_API_KEY ? "enabled (Gemini)" : "disabled (set GEMINI_API_KEY)"}`);
 console.log(`Todos: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
 console.log(`Habits: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
-console.log(`Gmail: ${GMAIL_ENABLED ? `enabled (${GMAIL_USER})` : "disabled (set GMAIL_USER)"}`);
+console.log(`Gmail: ${GMAIL_ENABLED ? `enabled (${gmailClients.map(c => c.label).join(", ")})` : "disabled (set GMAIL_USER)"}`);
 console.log(`Daily briefing: ${CHECKIN_ENABLED ? `enabled (${DAILY_BRIEFING_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`End-of-day recap: ${CHECKIN_ENABLED ? `enabled (${END_OF_DAY_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`Post-meeting debrief: ${CALENDAR_ENABLED && CHECKIN_ENABLED ? "enabled" : "disabled (requires calendar + memory)"}`);
