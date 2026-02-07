@@ -12,6 +12,7 @@ import { spawn } from "bun";
 import { writeFile, mkdir, readFile, unlink, stat } from "fs/promises";
 import { join, extname } from "path";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
+import { google } from "googleapis";
 
 // ============================================================
 // CONFIGURATION
@@ -39,6 +40,26 @@ const supabase: SupabaseClient | null = MEMORY_ENABLED
 // Scheduled check-ins
 const CHECKIN_INTERVAL_MINUTES = parseInt(process.env.CHECKIN_INTERVAL_MINUTES || "30", 10);
 const CHECKIN_ENABLED = MEMORY_ENABLED; // check-ins need memory for context
+
+// Google Calendar
+const GOOGLE_CALENDAR_KEY_FILE = process.env.GOOGLE_CALENDAR_KEY_FILE
+  || join(RELAY_DIR, "google-service-account.json");
+const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || "primary";
+
+let CALENDAR_ENABLED = false;
+let calendarClient: ReturnType<typeof google.calendar> | null = null;
+
+try {
+  await stat(GOOGLE_CALENDAR_KEY_FILE);
+  const auth = new google.auth.GoogleAuth({
+    keyFile: GOOGLE_CALENDAR_KEY_FILE,
+    scopes: ["https://www.googleapis.com/auth/calendar.readonly"],
+  });
+  calendarClient = google.calendar({ version: "v3", auth });
+  CALENDAR_ENABLED = true;
+} catch {
+  // Key file doesn't exist or is unreadable — calendar stays disabled
+}
 
 // Voice support
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
@@ -266,6 +287,84 @@ async function getLastCheckinTime(): Promise<string | null> {
 }
 
 // ============================================================
+// GOOGLE CALENDAR
+// ============================================================
+
+async function getCalendarContext(): Promise<string> {
+  if (!CALENDAR_ENABLED || !calendarClient) return "";
+
+  try {
+    const now = new Date();
+
+    // End of tomorrow morning (covers "rest of today" + "first thing tomorrow")
+    const tomorrow = new Date(now);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(12, 0, 0, 0);
+
+    const res = await calendarClient.events.list({
+      calendarId: GOOGLE_CALENDAR_ID,
+      timeMin: now.toISOString(),
+      timeMax: tomorrow.toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+      maxResults: 15,
+    });
+
+    const events = res.data.items;
+    if (!events || events.length === 0) return "";
+
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const todayDate = now.toLocaleDateString("en-US", { timeZone: tz });
+
+    const lines = events.map((ev) => {
+      const start = ev.start?.dateTime
+        ? new Date(ev.start.dateTime)
+        : ev.start?.date
+          ? new Date(ev.start.date + "T00:00:00")
+          : null;
+
+      const end = ev.end?.dateTime
+        ? new Date(ev.end.dateTime)
+        : null;
+
+      if (!start) return `- ${ev.summary || "(no title)"}`;
+
+      const isAllDay = !ev.start?.dateTime;
+      const eventDate = start.toLocaleDateString("en-US", { timeZone: tz });
+      const isTomorrow = eventDate !== todayDate;
+      const prefix = isTomorrow ? "Tomorrow " : "";
+
+      if (isAllDay) {
+        return `- ${prefix}All day: ${ev.summary || "(no title)"}`;
+      }
+
+      const timeStr = start.toLocaleTimeString("en-US", {
+        timeZone: tz,
+        hour: "numeric",
+        minute: "2-digit",
+      });
+
+      let duration = "";
+      if (end) {
+        const mins = Math.round((end.getTime() - start.getTime()) / 60000);
+        duration = mins >= 60
+          ? ` (${Math.floor(mins / 60)} hr${mins >= 120 ? "s" : ""}${mins % 60 ? ` ${mins % 60} min` : ""})`
+          : ` (${mins} min)`;
+      }
+
+      const location = ev.location ? `, ${ev.location}` : "";
+
+      return `- ${prefix}${timeStr}: ${ev.summary || "(no title)"}${duration}${location}`;
+    });
+
+    return `\nUPCOMING CALENDAR:\n${lines.join("\n")}`;
+  } catch (error) {
+    console.error("getCalendarContext error:", error);
+    return "";
+  }
+}
+
+// ============================================================
 // INTENT DETECTION
 // ============================================================
 
@@ -307,7 +406,10 @@ async function runCheckin(): Promise<void> {
   if (!CHECKIN_ENABLED) return;
 
   try {
-    const memoryContext = await getMemoryContext();
+    const [memoryContext, calendarContext] = await Promise.all([
+      getMemoryContext(),
+      getCalendarContext(),
+    ]);
     const lastCheckin = await getLastCheckinTime();
 
     const now = new Date();
@@ -336,14 +438,16 @@ You are Raya, a proactive AI assistant. You are considering whether to send a ch
 CURRENT TIME: ${timeStr}
 LAST CHECK-IN: ${lastCheckinStr}
 ${memoryContext}
+${calendarContext}
 
 RULES:
 1. Max 2-3 check-ins per day. If you've already checked in recently, say NO.
-2. Only check in if there's a genuine REASON — a goal deadline approaching, it's been a long time since last contact, a meaningful follow-up, or a natural time-of-day touchpoint (good morning, end of day).
+2. Only check in if there's a genuine REASON — a goal deadline approaching, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint (good morning, end of day).
 3. Consider time of day. Late night or very early morning — probably NO.
 4. Be brief, warm, and helpful. Not robotic. Not annoying.
 5. If you have nothing meaningful to say, say NO.
 6. Never mention that you're an AI deciding whether to check in. Just be natural.
+7. If there are upcoming calendar events, you can mention them naturally (e.g. "heads up, you have a meeting in 30 min").
 
 RESPOND IN THIS EXACT FORMAT (no extra text):
 DECISION: YES or NO
@@ -891,7 +995,10 @@ async function buildPrompt(userMessage: string): Promise<string> {
     minute: "2-digit",
   });
 
-  const memoryContext = await getMemoryContext();
+  const [memoryContext, calendarContext] = await Promise.all([
+    getMemoryContext(),
+    getCalendarContext(),
+  ]);
 
   const memoryInstructions = MEMORY_ENABLED
     ? `
@@ -914,6 +1021,7 @@ You are responding via Telegram. Keep responses concise.
 
 Current time: ${timeStr}
 ${memoryContext}
+${calendarContext}
 ${memoryInstructions}
 User: ${userMessage}
 `.trim();
@@ -1166,6 +1274,7 @@ console.log(`Memory: ${MEMORY_ENABLED ? "enabled (Supabase)" : "disabled (set SU
 console.log(`Voice transcription: ${GEMINI_API_KEY ? "enabled" : "disabled (set GEMINI_API_KEY)"}`);
 console.log(`Voice replies: ${VOICE_REPLIES_ENABLED ? "enabled" : "disabled (set ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID)"}`);
 console.log(`Webhook: ${WEBHOOK_SECRET ? `enabled on port ${WEBHOOK_PORT}` : "disabled (set WEBHOOK_SECRET)"}`);
+console.log(`Calendar: ${CALENDAR_ENABLED ? "enabled (Google)" : "disabled (no service account key)"}`);
 console.log(`Check-ins: ${CHECKIN_ENABLED ? `enabled (every ${CHECKIN_INTERVAL_MINUTES} min)` : "disabled (requires memory)"}`);
 
 bot.start({
