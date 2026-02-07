@@ -13,7 +13,7 @@ import {
   calendarClient,
   GOOGLE_CALENDAR_ID,
 } from "./config";
-import { getMemoryContext, getTodoContext, getHabitContext, logCheckin, getLastCheckinTime, storeMessage } from "./memory";
+import { getMemoryContext, getTodoContext, getHabitContext, getContactContext, logCheckin, getLastCheckinTime, storeMessage } from "./memory";
 import { getCalendarContext } from "./calendar";
 import { getEmailContext } from "./gmail";
 import { getWeatherContext } from "./search";

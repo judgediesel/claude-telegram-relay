@@ -13,7 +13,7 @@ import {
   TWILIO_ENABLED,
   RAYA_SYSTEM_PROMPT,
 } from "./config";
-import { getMemoryContext, getConversationContext, getTodoContext, getHabitContext } from "./memory";
+import { getMemoryContext, getConversationContext, getTodoContext, getHabitContext, getContactContext } from "./memory";
 import { getCalendarContext } from "./calendar";
 import { getEmailContext } from "./gmail";
 import { getWeatherContext, searchWeb } from "./search";
@@ -134,11 +134,12 @@ export async function buildPrompt(userMessage: string): Promise<string> {
   const isCatchUp = /catch me up|what did i miss|fill me in|bring me up to speed|what's new|summary of|recap/i.test(userMessage);
 
   const contextFetches: Promise<string>[] = [
-    getMemoryContext(),
+    getMemoryContext(userMessage),
     getCalendarContext(),
     getTodoContext(),
     getHabitContext(),
     getEmailContext(),
+    getContactContext(userMessage),
   ];
 
   // Only fetch weather for catch-up requests or if they ask about weather
@@ -148,7 +149,7 @@ export async function buildPrompt(userMessage: string): Promise<string> {
     contextFetches.push(Promise.resolve(""));
   }
 
-  const [memoryContext, calendarContext, todoContext, habitContext, emailContext, weatherContext] = await Promise.all(contextFetches);
+  const [memoryContext, calendarContext, todoContext, habitContext, emailContext, contactContext, weatherContext] = await Promise.all(contextFetches);
 
   const tagInstructions = MEMORY_ENABLED
     ? `
@@ -175,6 +176,9 @@ Calendar:${CALENDAR_ENABLED ? `
 Web Search:${GEMINI_API_KEY ? `
 - [SEARCH: query] — Search the web for current information. Use when asked about news, weather, prices, current events, or anything you don't know.` : " (disabled)"}
 
+Contacts:
+- [CONTACT: name | relationship | email | phone | notes] — Save or update a contact. Only name is required, others are optional. Use when Mark mentions someone new or shares contact details.
+
 SMS/Phone:${TWILIO_ENABLED ? `
 - [SMS: message text] — Send an SMS to the user's phone. Use for urgent reminders or when the user asks you to text them.
 - [CALL: message text] — Call the user's phone and speak a message. Use only for critical/emergency alerts or when the user explicitly asks.` : " (disabled)"}
@@ -197,6 +201,7 @@ ${calendarContext}
 ${todoContext}
 ${habitContext}
 ${emailContext}
+${contactContext}
 ${weatherContext}
 ${tagInstructions}
 ${isCatchUp ? "\nThe user wants a full catch-up summary. Cover: calendar, todos, habits (streaks), emails, and anything notable. Be thorough but organized.\n" : ""}

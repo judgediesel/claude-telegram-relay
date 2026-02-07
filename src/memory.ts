@@ -1,9 +1,145 @@
 /**
- * Memory — Supabase-backed persistent memory, conversation buffer, todos, habits
+ * Memory — Supabase-backed persistent memory, conversation buffer, todos, habits,
+ *           vector search (Gemini embeddings), contacts/CRM
  */
 
-import { supabase, MEMORY_ENABLED, CONTEXT_MESSAGE_COUNT } from "./config";
+import { supabase, MEMORY_ENABLED, CONTEXT_MESSAGE_COUNT, GEMINI_API_KEY } from "./config";
 import type { ConversationMessage } from "./types";
+
+const GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
+
+// ============================================================
+// VECTOR EMBEDDINGS (Gemini)
+// ============================================================
+
+// In-memory cache: fact ID → embedding vector
+const embeddingCache = new Map<string, { content: string; vector: number[] }>();
+
+const EMBEDDING_DIMENSIONS = 1536; // Match Supabase pgvector column
+
+async function generateEmbedding(text: string): Promise<number[] | null> {
+  if (!GEMINI_API_KEY) return null;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content: { parts: [{ text }] },
+          outputDimensionality: EMBEDDING_DIMENSIONS,
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      console.error("Embedding API error:", await res.text());
+      return null;
+    }
+
+    const data = await res.json();
+    return data?.embedding?.values ?? null;
+  } catch (error) {
+    console.error("generateEmbedding error:", error);
+    return null;
+  }
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) return 0;
+  let dot = 0, magA = 0, magB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(magA) * Math.sqrt(magB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+/** Load all fact embeddings into memory and backfill any missing ones */
+export async function initEmbeddings(): Promise<void> {
+  if (!supabase || !GEMINI_API_KEY) return;
+
+  try {
+    const { data: facts } = await supabase
+      .from("memory")
+      .select("id, content, embedding")
+      .eq("type", "fact");
+
+    if (!facts || facts.length === 0) return;
+
+    const needsBackfill: typeof facts = [];
+
+    for (const fact of facts) {
+      // pgvector returns embeddings as a string like "[0.1,0.2,...]"
+      let vector: number[] | null = null;
+      if (fact.embedding) {
+        if (Array.isArray(fact.embedding)) {
+          vector = fact.embedding;
+        } else if (typeof fact.embedding === "string") {
+          try {
+            vector = JSON.parse(fact.embedding);
+          } catch { /* not parseable */ }
+        }
+      }
+
+      if (vector && vector.length > 0) {
+        embeddingCache.set(fact.id, { content: fact.content, vector });
+      } else {
+        needsBackfill.push(fact);
+      }
+    }
+
+    if (needsBackfill.length > 0) {
+      console.log(`Backfilling embeddings for ${needsBackfill.length} facts...`);
+      for (const fact of needsBackfill) {
+        const vector = await generateEmbedding(fact.content);
+        if (vector) {
+          embeddingCache.set(fact.id, { content: fact.content, vector });
+          // Try to store in DB — may fail if column type doesn't accept arrays
+          await supabase
+            .from("memory")
+            .update({ embedding: vector })
+            .eq("id", fact.id)
+            .then(() => {})
+            .catch(() => {});
+        }
+      }
+      console.log("Embedding backfill complete");
+    }
+
+    console.log(`Vector search: ${embeddingCache.size} facts indexed`);
+  } catch (error) {
+    console.error("initEmbeddings error:", error);
+  }
+}
+
+/** Find facts most relevant to a query using cosine similarity */
+async function getRelevantFacts(query: string, topK = 10): Promise<string[]> {
+  if (embeddingCache.size === 0) return [];
+
+  const queryVector = await generateEmbedding(query);
+  if (!queryVector) return [];
+
+  const scored: Array<{ content: string; score: number }> = [];
+
+  for (const [, entry] of embeddingCache) {
+    // Skip contacts — they have their own context section
+    if (entry.content.startsWith(CONTACT_PREFIX)) continue;
+    const score = cosineSimilarity(queryVector, entry.vector);
+    scored.push({ content: entry.content, score });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+
+  // Return top K facts with similarity > 0.3 (filter out noise)
+  return scored
+    .filter((s) => s.score > 0.3)
+    .slice(0, topK)
+    .map((s) => s.content);
+}
 
 // ============================================================
 // CONVERSATION BUFFER (in-memory for active session)
@@ -71,8 +207,34 @@ export async function storeFact(content: string): Promise<void> {
 
     if (existing && existing.length > 0) return;
 
-    await supabase.from("memory").insert({ type: "fact", content });
-    console.log(`Stored fact: ${content.substring(0, 60)}`);
+    // Generate embedding for vector search
+    const vector = await generateEmbedding(content);
+
+    const row: Record<string, unknown> = { type: "fact", content };
+    if (vector) row.embedding = vector;
+
+    let { data: inserted, error } = await supabase
+      .from("memory")
+      .insert(row)
+      .select("id")
+      .single();
+
+    // Retry without embedding if it caused the error
+    if (error && vector) {
+      console.error("storeFact insert error (retrying without embedding):", error.message);
+      delete row.embedding;
+      const retry = await supabase.from("memory").insert(row).select("id").single();
+      inserted = retry.data;
+      error = retry.error;
+    }
+
+    if (inserted && vector) {
+      embeddingCache.set(inserted.id, { content, vector });
+      // Store embedding separately if insert didn't include it
+      await supabase.from("memory").update({ embedding: vector }).eq("id", inserted.id);
+    }
+
+    console.log(`Stored fact: ${content.substring(0, 60)}${vector ? " (with embedding)" : ""}`);
   } catch (error) {
     console.error("storeFact error:", error);
   }
@@ -120,20 +282,24 @@ export async function completeGoal(searchText: string): Promise<void> {
   }
 }
 
-export async function getMemoryContext(): Promise<string> {
+export async function getMemoryContext(query?: string): Promise<string> {
   if (!supabase) return "";
 
   try {
     // Only fetch Supabase messages if conversation buffer is empty (fresh restart)
     const needsHistory = conversationBuffer.length === 0;
 
-    const [factsRes, goalsRes, messagesRes] = await Promise.all([
-      supabase
-        .from("memory")
-        .select("content")
-        .eq("type", "fact")
-        .order("created_at", { ascending: false })
-        .limit(20), // Limit to 20 most recent facts instead of ALL
+    const [relevantFacts, goalsRes, messagesRes] = await Promise.all([
+      // Use vector search if we have a query and embeddings, otherwise fall back to recent
+      query && embeddingCache.size > 0
+        ? getRelevantFacts(query, 15)
+        : supabase
+            .from("memory")
+            .select("content")
+            .eq("type", "fact")
+            .order("created_at", { ascending: false })
+            .limit(20)
+            .then((res) => (res.data || []).map((f) => f.content)),
       supabase
         .from("memory")
         .select("content, deadline")
@@ -151,10 +317,12 @@ export async function getMemoryContext(): Promise<string> {
 
     let context = "";
 
-    const facts = factsRes.data || [];
-    if (facts.length > 0) {
-      context += "\nPERSISTENT MEMORY (facts you know about the user):\n";
-      context += facts.map((f) => `- ${f.content}`).join("\n");
+    if (relevantFacts.length > 0) {
+      const label = query && embeddingCache.size > 0
+        ? "RELEVANT MEMORY (facts most related to this conversation)"
+        : "PERSISTENT MEMORY (facts you know about the user)";
+      context += `\n${label}:\n`;
+      context += relevantFacts.map((f) => `- ${f}`).join("\n");
     }
 
     const goals = goalsRes.data || [];
@@ -398,6 +566,120 @@ export async function getHabitContext(): Promise<string> {
     return context;
   } catch (error) {
     console.error("getHabitContext error:", error);
+    return "";
+  }
+}
+
+// ============================================================
+// CONTACTS / CRM
+// ============================================================
+
+const CONTACT_PREFIX = "[CONTACT] ";
+
+export async function storeContact(
+  name: string,
+  relationship?: string,
+  email?: string,
+  phone?: string,
+  notes?: string
+): Promise<void> {
+  if (!supabase) return;
+  try {
+    // Build structured content string with prefix
+    const parts = [name];
+    if (relationship) parts.push(`relationship: ${relationship}`);
+    if (email) parts.push(`email: ${email}`);
+    if (phone) parts.push(`phone: ${phone}`);
+    if (notes) parts.push(`notes: ${notes}`);
+    const content = CONTACT_PREFIX + parts.join(" | ");
+
+    // Check if contact already exists (by name in contact-prefixed facts)
+    const { data: existing } = await supabase
+      .from("memory")
+      .select("id, content")
+      .eq("type", "fact")
+      .ilike("content", `${CONTACT_PREFIX}${name}%`)
+      .limit(1);
+
+    if (existing && existing.length > 0) {
+      // Update existing contact
+      const vector = await generateEmbedding(content);
+      const update: Record<string, unknown> = { content, updated_at: new Date().toISOString() };
+      if (vector) update.embedding = vector;
+      await supabase.from("memory").update(update).eq("id", existing[0].id);
+      if (vector) embeddingCache.set(existing[0].id, { content, vector });
+      console.log(`Updated contact: ${name}`);
+    } else {
+      // Create new contact — stored as fact type with [CONTACT] prefix
+      const vector = await generateEmbedding(content);
+      const row: Record<string, unknown> = { type: "fact", content };
+      if (vector) row.embedding = vector;
+
+      let { data: inserted, error } = await supabase
+        .from("memory")
+        .insert(row)
+        .select("id")
+        .single();
+
+      if (error && vector) {
+        delete row.embedding;
+        const retry = await supabase.from("memory").insert(row).select("id").single();
+        inserted = retry.data;
+        if (inserted) {
+          await supabase.from("memory").update({ embedding: vector }).eq("id", inserted.id);
+        }
+      }
+
+      if (inserted && vector) {
+        embeddingCache.set(inserted.id, { content, vector });
+      }
+      console.log(`Stored contact: ${name}`);
+    }
+  } catch (error) {
+    console.error("storeContact error:", error);
+  }
+}
+
+export async function getContactContext(query?: string): Promise<string> {
+  if (!supabase) return "";
+
+  try {
+    // If we have a query and embeddings, use vector search to find relevant contacts
+    if (query && embeddingCache.size > 0) {
+      const queryVector = await generateEmbedding(query);
+      if (queryVector) {
+        const scored: Array<{ content: string; score: number }> = [];
+
+        // Search only contact entries in embedding cache
+        for (const [, entry] of embeddingCache) {
+          if (!entry.content.startsWith(CONTACT_PREFIX)) continue;
+          const score = cosineSimilarity(queryVector, entry.vector);
+          if (score > 0.4) scored.push({ content: entry.content.replace(CONTACT_PREFIX, ""), score });
+        }
+
+        scored.sort((a, b) => b.score - a.score);
+        const relevant = scored.slice(0, 5);
+
+        if (relevant.length > 0) {
+          return "\nRELEVANT CONTACTS:\n" + relevant.map((c) => `- ${c.content}`).join("\n");
+        }
+      }
+    }
+
+    // Fallback: return all contacts (for check-ins, briefings, etc.)
+    const { data: contacts } = await supabase
+      .from("memory")
+      .select("content")
+      .eq("type", "fact")
+      .ilike("content", `${CONTACT_PREFIX}%`)
+      .order("updated_at", { ascending: false })
+      .limit(20);
+
+    if (!contacts || contacts.length === 0) return "";
+
+    return "\nCONTACTS:\n" + contacts.map((c) => `- ${c.content.replace(CONTACT_PREFIX, "")}`).join("\n");
+  } catch (error) {
+    console.error("getContactContext error:", error);
     return "";
   }
 }

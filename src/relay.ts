@@ -35,7 +35,7 @@ import {
 } from "./config";
 
 // Memory
-import { storeMessage } from "./memory";
+import { storeMessage, initEmbeddings } from "./memory";
 
 // Claude CLI
 import { callClaudeWithSearch, buildPrompt } from "./claude";
@@ -123,6 +123,9 @@ if (!BOT_TOKEN) {
 // Create directories
 await mkdir(TEMP_DIR, { recursive: true });
 await mkdir(UPLOADS_DIR, { recursive: true });
+
+// Initialize vector search embeddings
+await initEmbeddings();
 
 // Acquire lock
 if (!(await acquireLock())) {

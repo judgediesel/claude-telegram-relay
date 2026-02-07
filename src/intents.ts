@@ -2,7 +2,7 @@
  * Intent detection — parse action tags from Claude responses and execute side effects
  */
 
-import { storeFact, storeGoal, completeGoal, storeTodo, completeTodo, storeHabit, completeHabit, removeHabit } from "./memory";
+import { storeFact, storeGoal, completeGoal, storeTodo, completeTodo, storeHabit, completeHabit, removeHabit, storeContact } from "./memory";
 import { createCalendarEvent } from "./calendar";
 import { sendSMS, makeCall } from "./twilio";
 
@@ -88,6 +88,22 @@ export function processIntents(response: string): { cleaned: string; intents: Pr
   // [CALL: message text]
   for (const match of response.matchAll(/\[CALL:\s*(.+?)\]/gi)) {
     intents.push(makeCall(match[1].trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [CONTACT: name | relationship | email | phone | notes]
+  for (const match of response.matchAll(
+    /\[CONTACT:\s*(.+?)(?:\s*\|\s*(.+?))?(?:\s*\|\s*(.+?))?(?:\s*\|\s*(.+?))?(?:\s*\|\s*(.+?))?\]/gi
+  )) {
+    intents.push(
+      storeContact(
+        match[1].trim(),
+        match[2]?.trim(),
+        match[3]?.trim(),
+        match[4]?.trim(),
+        match[5]?.trim()
+      )
+    );
     cleaned = cleaned.replace(match[0], "");
   }
 
