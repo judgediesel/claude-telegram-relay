@@ -111,6 +111,7 @@ const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
 const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER || "";
 const TWILIO_USER_PHONE = process.env.TWILIO_USER_PHONE || "";
+const TWILIO_PUBLIC_URL = process.env.TWILIO_PUBLIC_URL || "";
 const TWILIO_ENABLED = !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_PHONE_NUMBER && TWILIO_USER_PHONE);
 
 // Voice support
@@ -910,6 +911,42 @@ async function makeCall(message: string, to?: string): Promise<void> {
     console.log(`Call initiated to ${recipient}: ${message.substring(0, 60)}`);
   } catch (error) {
     console.error("makeCall error:", error);
+  }
+}
+
+async function startConversationCall(to?: string): Promise<void> {
+  if (!TWILIO_ENABLED || !TWILIO_PUBLIC_URL) {
+    console.error("Conversation call requires TWILIO_PUBLIC_URL");
+    return;
+  }
+
+  const recipient = to || TWILIO_USER_PHONE;
+  try {
+    const res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${btoa(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`)}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          From: TWILIO_PHONE_NUMBER,
+          To: recipient,
+          Url: `${TWILIO_PUBLIC_URL}/twilio/voice`,
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error("Conversation call error:", err);
+      return;
+    }
+
+    console.log(`Conversation call initiated to ${recipient}`);
+  } catch (error) {
+    console.error("startConversationCall error:", error);
   }
 }
 
@@ -1881,6 +1918,147 @@ if (WEBHOOK_SECRET) {
         } catch (error) {
           console.error("Twilio webhook error:", error);
           return new Response("<Response/>", { headers: { "Content-Type": "text/xml" } });
+        }
+      }
+
+      // Twilio voice conversation — answer and start listening
+      if (req.method === "POST" && url.pathname === "/twilio/voice" && TWILIO_ENABLED) {
+        try {
+          const formData = await req.formData();
+          const from = formData.get("From")?.toString() || "";
+          const to = formData.get("To")?.toString() || "";
+
+          // Outbound calls: From=Twilio, To=user. Inbound: From=user, To=Twilio.
+          const isAuthorizedCall = from === TWILIO_USER_PHONE || to === TWILIO_USER_PHONE;
+          if (!isAuthorizedCall) {
+            return new Response("<Response><Say>Sorry, this number is not authorized.</Say><Hangup/></Response>", {
+              headers: { "Content-Type": "text/xml" },
+            });
+          }
+
+          console.log(`Voice call started from ${from}`);
+
+          // Greet and start listening
+          const twiml = `<Response>
+            <Say voice="Polly.Matthew">Hey Mark, what's up?</Say>
+            <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST">
+              <Say voice="Polly.Matthew">I'm listening.</Say>
+            </Gather>
+            <Say voice="Polly.Matthew">I didn't hear anything. Goodbye!</Say>
+          </Response>`;
+
+          return new Response(twiml, { headers: { "Content-Type": "text/xml" } });
+        } catch (error) {
+          console.error("Twilio voice error:", error);
+          return new Response("<Response><Say>Something went wrong.</Say></Response>", {
+            headers: { "Content-Type": "text/xml" },
+          });
+        }
+      }
+
+      // Twilio gather — process speech, respond, loop
+      if (req.method === "POST" && url.pathname === "/twilio/gather" && TWILIO_ENABLED) {
+        try {
+          const formData = await req.formData();
+          const speechResult = formData.get("SpeechResult")?.toString() || "";
+
+          if (!speechResult) {
+            return new Response(`<Response>
+              <Say voice="Polly.Matthew">I didn't catch that. Try again.</Say>
+              <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+              <Say voice="Polly.Matthew">Still nothing. Goodbye!</Say>
+            </Response>`, { headers: { "Content-Type": "text/xml" } });
+          }
+
+          console.log(`Voice input: ${speechResult}`);
+
+          // Process through Claude
+          await storeMessage("user", speechResult, { source: "phone" });
+          const enrichedPrompt = await buildPrompt(speechResult);
+          const response = await callClaude(enrichedPrompt, { resume: true });
+          const { cleaned, intents } = processIntents(response);
+          await Promise.all(intents);
+          await storeMessage("assistant", cleaned, { source: "phone" });
+
+          // Forward to Telegram for visibility
+          sendTelegramText(`[Phone call]\nMark: ${speechResult}\nRaya: ${cleaned}`).catch(() => {});
+
+          // Try ElevenLabs voice for response
+          let twiml: string;
+          if (ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID) {
+            try {
+              const audioRes = await fetch(
+                `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+                {
+                  method: "POST",
+                  headers: {
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    text: cleaned,
+                    model_id: "eleven_monolingual_v1",
+                    voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+                  }),
+                }
+              );
+
+              if (audioRes.ok) {
+                const audioBuffer = await audioRes.arrayBuffer();
+                const uploadForm = new FormData();
+                uploadForm.append("reqtype", "fileupload");
+                uploadForm.append("time", "1h");
+                uploadForm.append("fileToUpload", new Blob([audioBuffer], { type: "audio/mpeg" }), "reply.mp3");
+
+                const uploadRes = await fetch("https://litterbox.catbox.moe/resources/internals/api.php", {
+                  method: "POST",
+                  body: uploadForm,
+                });
+
+                if (uploadRes.ok) {
+                  const audioUrl = (await uploadRes.text()).trim();
+                  twiml = `<Response>
+                    <Play>${escapeXml(audioUrl)}</Play>
+                    <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+                    <Say voice="Polly.Matthew">Are you still there?</Say>
+                    <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+                    <Say voice="Polly.Matthew">Okay, goodbye!</Say>
+                  </Response>`;
+                } else {
+                  twiml = `<Response>
+                    <Say voice="Polly.Matthew">${escapeXml(cleaned)}</Say>
+                    <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+                    <Say voice="Polly.Matthew">Are you still there?</Say>
+                    <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+                  </Response>`;
+                }
+              } else {
+                twiml = `<Response>
+                  <Say voice="Polly.Matthew">${escapeXml(cleaned)}</Say>
+                  <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+                </Response>`;
+              }
+            } catch {
+              twiml = `<Response>
+                <Say voice="Polly.Matthew">${escapeXml(cleaned)}</Say>
+                <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+              </Response>`;
+            }
+          } else {
+            twiml = `<Response>
+              <Say voice="Polly.Matthew">${escapeXml(cleaned)}</Say>
+              <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+            </Response>`;
+          }
+
+          console.log(`Voice reply: ${cleaned.substring(0, 60)}`);
+          return new Response(twiml, { headers: { "Content-Type": "text/xml" } });
+        } catch (error) {
+          console.error("Twilio gather error:", error);
+          return new Response(`<Response>
+            <Say voice="Polly.Matthew">Sorry, I had an error. Let me try again.</Say>
+            <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+          </Response>`, { headers: { "Content-Type": "text/xml" } });
         }
       }
 
