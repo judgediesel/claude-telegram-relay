@@ -12,7 +12,15 @@ A minimal relay that connects Telegram to Claude Code CLI. You send a message on
 ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
 │   Telegram   │────▶│    Relay     │────▶│  Claude CLI  │
 │    (you)     │◀────│  (always on) │◀────│   (spawned)  │
-└──────────────┘     └──────────────┘     └──────────────┘
+└──────────────┘     └──────┬───────┘     └──────────────┘
+                            │
+                     ┌──────┴───────┐
+                     │  HTTP API    │
+                     │  /send /ask  │
+                     └──────────────┘
+                            ▲
+                     scripts, cron,
+                     tools, etc.
 ```
 
 ## Why This Approach?
@@ -261,6 +269,44 @@ Pattern for remembering facts and goals across sessions:
 - Supabase (cloud, searchable)
 - Any database you prefer
 
+## Webhook API
+
+The relay includes an HTTP server that lets any script, cron job, or tool push messages through the bot. Set `WEBHOOK_SECRET` in `.env` to enable it.
+
+### Endpoints
+
+**`GET /health`** — Health check (no auth required)
+```bash
+curl http://localhost:3100/health
+# {"ok":true}
+```
+
+**`POST /send`** — Send a message and/or files to Telegram
+```bash
+curl -X POST http://localhost:3100/send \
+  -H "Authorization: Bearer YOUR_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Deploy finished!"}'
+
+# With a file attachment
+curl -X POST http://localhost:3100/send \
+  -H "Authorization: Bearer YOUR_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Here are the logs","files":["/tmp/output.log"]}'
+```
+
+**`POST /ask`** — Run a prompt through Claude, send the response to Telegram
+```bash
+curl -X POST http://localhost:3100/ask \
+  -H "Authorization: Bearer YOUR_SECRET" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"Summarize my git log from today"}'
+```
+
+### Auth
+
+All endpoints except `/health` require a `Bearer` token matching `WEBHOOK_SECRET`. If `WEBHOOK_SECRET` is not set, the HTTP server does not start.
+
 ## Environment Variables
 
 ```bash
@@ -271,6 +317,10 @@ TELEGRAM_USER_ID=         # From @userinfobot (for security)
 # Optional - Paths (defaults work for most setups)
 CLAUDE_PATH=claude        # Path to claude CLI (if not in PATH)
 RELAY_DIR=~/.claude-relay # Working directory for temp files
+
+# Optional - Webhook
+WEBHOOK_SECRET=           # Enables HTTP API (generate with: openssl rand -hex 32)
+WEBHOOK_PORT=3100         # Default: 3100
 
 # Optional - Features
 SUPABASE_URL=             # For cloud memory persistence
