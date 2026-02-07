@@ -17,7 +17,7 @@ import {
   TEMP_DIR,
   MAX_FILE_SIZE,
 } from "./config";
-import { storeMessage, storeTodo, storeHabit, completeTodo, completeHabit } from "./memory";
+import { storeMessage, storeTodo, storeHabit, completeTodo, completeHabit, searchMemory, autoExtractFacts } from "./memory";
 import { callClaude, callClaudeWithSearch, buildPrompt } from "./claude";
 import { processIntents } from "./intents";
 import { sendTelegramText, sendTelegramFile, sendTelegramResponse } from "./telegram";
@@ -41,7 +41,17 @@ export function startWebhookServer(): void {
 
       // Health check — no auth required
       if (req.method === "GET" && url.pathname === "/health") {
-        return jsonResponse({ ok: true });
+        const mem = process.memoryUsage();
+        return jsonResponse({
+          ok: true,
+          uptime: Math.round(process.uptime()),
+          memory: {
+            heapUsed: Math.round(mem.heapUsed / 1024 / 1024),
+            heapTotal: Math.round(mem.heapTotal / 1024 / 1024),
+            rss: Math.round(mem.rss / 1024 / 1024),
+          },
+          version: "2.0.0",
+        });
       }
 
       // Twilio incoming SMS webhook — no bearer auth (Twilio POSTs form data)
@@ -351,6 +361,31 @@ export function startWebhookServer(): void {
           });
         }
 
+        // Contacts list
+        if (url.pathname === "/api/contacts" && supabase) {
+          const { data } = await supabase
+            .from("memory")
+            .select("id, content, updated_at, created_at")
+            .eq("type", "fact")
+            .ilike("content", "[CONTACT]%")
+            .order("updated_at", { ascending: false });
+
+          const contacts = (data || []).map(c => ({
+            ...c,
+            content: c.content.replace("[CONTACT] ", ""),
+          }));
+          return jsonResponse({ contacts });
+        }
+
+        // Memory search (semantic)
+        if (url.pathname === "/api/memory-search" && supabase) {
+          const q = url.searchParams.get("q");
+          if (!q) return jsonResponse({ results: [] });
+
+          const results = await searchMemory(q, 20);
+          return jsonResponse({ results, query: q });
+        }
+
         return jsonResponse({ ok: false, error: "Not found" }, 404);
       }
 
@@ -478,8 +513,9 @@ export function startWebhookServer(): void {
           await Promise.all(intents);
           await storeMessage("assistant", cleaned, { source: "dashboard" });
 
-          // Also forward to Telegram
+          // Also forward to Telegram + auto-learn
           sendTelegramText(`[via Dashboard] ${body.message}\n\nRaya: ${cleaned}`).catch(() => {});
+          autoExtractFacts(body.message, cleaned).catch(() => {});
 
           return jsonResponse({ ok: true, response: cleaned });
         } catch (error) {

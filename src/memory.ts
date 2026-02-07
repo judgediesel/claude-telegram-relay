@@ -117,6 +117,23 @@ export async function initEmbeddings(): Promise<void> {
 }
 
 /** Find facts most relevant to a query using cosine similarity */
+export async function searchMemory(query: string, topK = 10): Promise<Array<{ content: string; score: number }>> {
+  if (embeddingCache.size === 0 || !GEMINI_API_KEY) return [];
+
+  const queryVector = await generateEmbedding(query);
+  if (!queryVector) return [];
+
+  const scored: Array<{ content: string; score: number }> = [];
+
+  for (const [, entry] of embeddingCache) {
+    const score = cosineSimilarity(queryVector, entry.vector);
+    if (score > 0.25) scored.push({ content: entry.content, score: Math.round(score * 100) / 100 });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, topK);
+}
+
 async function getRelevantFacts(query: string, topK = 10): Promise<string[]> {
   if (embeddingCache.size === 0) return [];
 
@@ -567,6 +584,80 @@ export async function getHabitContext(): Promise<string> {
   } catch (error) {
     console.error("getHabitContext error:", error);
     return "";
+  }
+}
+
+// ============================================================
+// AUTO-LEARNING (extract facts from conversations via Gemini)
+// ============================================================
+
+export async function autoExtractFacts(userMessage: string, assistantResponse: string): Promise<void> {
+  if (!supabase || !GEMINI_API_KEY) return;
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{
+              text: `Analyze this conversation and extract any facts worth remembering long-term about the user. Only extract GENUINELY useful facts — things like preferences, personal details, relationships, decisions, plans, health info, business details, or recurring topics. Do NOT extract transient things like "user asked about the weather" or "user said hi."
+
+If there are contacts mentioned (people with names, relationships, emails, phones), format them as: CONTACT: Name | relationship | email | phone | notes
+
+USER: ${userMessage}
+
+ASSISTANT: ${assistantResponse}
+
+Respond with ONLY a JSON array of strings. Each string is one fact. If there are no facts worth remembering, respond with [].
+Example: ["Prefers morning meetings", "CONTACT: Sarah Chen | business partner | sarah@example.com"]`
+            }]
+          }],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 500,
+          },
+        }),
+      }
+    );
+
+    if (!res.ok) return;
+
+    const data = await res.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "[]";
+
+    // Parse JSON array — handle markdown code blocks
+    const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    let facts: string[];
+    try {
+      facts = JSON.parse(cleaned);
+    } catch {
+      return; // Not valid JSON, skip
+    }
+
+    if (!Array.isArray(facts) || facts.length === 0) return;
+
+    for (const fact of facts) {
+      if (typeof fact !== "string" || fact.length < 5) continue;
+
+      if (fact.startsWith("CONTACT:")) {
+        // Parse contact format: CONTACT: Name | relationship | email | phone | notes
+        const parts = fact.replace("CONTACT:", "").trim().split("|").map(s => s.trim());
+        if (parts.length >= 1 && parts[0]) {
+          await storeContact(parts[0], parts[1], parts[2], parts[3], parts[4]);
+        }
+      } else {
+        await storeFact(fact);
+      }
+    }
+
+    if (facts.length > 0) {
+      console.log(`Auto-learned ${facts.length} fact(s) from conversation`);
+    }
+  } catch (error) {
+    console.error("autoExtractFacts error:", error);
   }
 }
 

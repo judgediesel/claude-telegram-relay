@@ -212,6 +212,7 @@
       <div class="tab tab-active" data-tab="overview">Overview</div>
       <div class="tab" data-tab="messages">Messages</div>
       <div class="tab" data-tab="memory">Memory</div>
+      <div class="tab" data-tab="contacts">Contacts</div>
       <div class="tab" data-tab="todos">Todos</div>
       <div class="tab" data-tab="habits">Habits</div>
       <div class="tab" data-tab="logs">Logs</div>
@@ -504,50 +505,135 @@
 
     async function showMemory() {
       const data = await api("/api/memory");
+      // Filter out contacts from facts display
+      const facts = (data.facts || []).filter(f => !f.content?.startsWith("[CONTACT]"));
+
       document.getElementById("content").innerHTML = `
-        <div class="grid md:grid-cols-2 gap-4 fade-in">
-          <div class="glass-strong p-5">
-            <div class="flex items-center justify-between mb-4">
-              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Memories</h3>
-              <span class="badge bg-cyan-500/10 text-cyan-400">${(data.facts || []).length}</span>
-            </div>
-            <div class="space-y-2 max-h-[60vh] overflow-y-auto pr-2">
-              ${(data.facts || []).map(f => `
-                <div class="flex gap-2 items-start group">
-                  <div class="w-1.5 h-1.5 rounded-full bg-cyan-500/50 mt-2 flex-shrink-0"></div>
-                  <span class="text-sm text-slate-400 leading-relaxed">${esc(f.content)}</span>
-                </div>
-              `).join("") || '<div class="text-slate-600 text-sm">No memories stored yet</div>'}
-            </div>
+        <div class="fade-in">
+          <!-- Semantic Search -->
+          <div class="glass-strong p-4 mb-4 flex gap-3 items-center">
+            <input type="text" id="memory-search-input" class="input-field flex-1" placeholder="Search memory semantically..." onkeydown="if(event.key==='Enter')searchMemoryUI()" />
+            <button onclick="searchMemoryUI()" class="btn btn-primary px-4 py-2">Search</button>
           </div>
-          <div class="space-y-4">
+          <div id="memory-search-results" class="hidden mb-4"></div>
+
+          <div class="grid md:grid-cols-2 gap-4">
             <div class="glass-strong p-5">
               <div class="flex items-center justify-between mb-4">
-                <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Active Goals</h3>
-                <span class="badge bg-violet-500/10 text-violet-400">${(data.goals || []).length}</span>
+                <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Memories</h3>
+                <span class="badge bg-cyan-500/10 text-cyan-400">${facts.length}</span>
               </div>
-              <div class="space-y-2">
-                ${(data.goals || []).map(g => `
-                  <div class="flex gap-2 items-start">
-                    <div class="w-1.5 h-1.5 rounded-full bg-violet-500/50 mt-2 flex-shrink-0"></div>
-                    <div>
-                      <span class="text-sm text-slate-300">${esc(g.content)}</span>
-                      ${g.deadline ? `<span class="text-xs text-amber-400/80 ml-1">by ${g.deadline}</span>` : ""}
-                    </div>
+              <div class="space-y-2 max-h-[60vh] overflow-y-auto pr-2">
+                ${facts.map(f => `
+                  <div class="flex gap-2 items-start group">
+                    <div class="w-1.5 h-1.5 rounded-full bg-cyan-500/50 mt-2 flex-shrink-0"></div>
+                    <span class="text-sm text-slate-400 leading-relaxed">${esc(f.content)}</span>
                   </div>
-                `).join("") || '<div class="text-slate-600 text-sm">No active goals</div>'}
+                `).join("") || '<div class="text-slate-600 text-sm">No memories stored yet</div>'}
               </div>
             </div>
-            <div class="glass-strong p-5">
-              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Completed Goals</h3>
-              <div class="space-y-2">
-                ${(data.completedGoals || []).map(g => `
-                  <div class="flex gap-2 items-start">
-                    <span class="text-emerald-500 text-xs mt-0.5">&#10003;</span>
-                    <span class="text-sm text-slate-600 line-through">${esc(g.content)}</span>
-                  </div>
-                `).join("") || '<div class="text-slate-600 text-sm">None yet</div>'}
+            <div class="space-y-4">
+              <div class="glass-strong p-5">
+                <div class="flex items-center justify-between mb-4">
+                  <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Active Goals</h3>
+                  <span class="badge bg-violet-500/10 text-violet-400">${(data.goals || []).length}</span>
+                </div>
+                <div class="space-y-2">
+                  ${(data.goals || []).map(g => `
+                    <div class="flex gap-2 items-start">
+                      <div class="w-1.5 h-1.5 rounded-full bg-violet-500/50 mt-2 flex-shrink-0"></div>
+                      <div>
+                        <span class="text-sm text-slate-300">${esc(g.content)}</span>
+                        ${g.deadline ? `<span class="text-xs text-amber-400/80 ml-1">by ${g.deadline}</span>` : ""}
+                      </div>
+                    </div>
+                  `).join("") || '<div class="text-slate-600 text-sm">No active goals</div>'}
+                </div>
               </div>
+              <div class="glass-strong p-5">
+                <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Completed Goals</h3>
+                <div class="space-y-2">
+                  ${(data.completedGoals || []).map(g => `
+                    <div class="flex gap-2 items-start">
+                      <span class="text-emerald-500 text-xs mt-0.5">&#10003;</span>
+                      <span class="text-sm text-slate-600 line-through">${esc(g.content)}</span>
+                    </div>
+                  `).join("") || '<div class="text-slate-600 text-sm">None yet</div>'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    async function searchMemoryUI() {
+      const input = document.getElementById("memory-search-input");
+      const resultsDiv = document.getElementById("memory-search-results");
+      const q = input.value.trim();
+      if (!q) return;
+
+      resultsDiv.classList.remove("hidden");
+      resultsDiv.innerHTML = '<div class="glass-strong p-4"><div class="flex items-center gap-2"><div class="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div><span class="text-slate-500 text-sm">Searching...</span></div></div>';
+
+      const data = await api(`/api/memory-search?q=${encodeURIComponent(q)}`);
+      const results = data.results || [];
+
+      resultsDiv.innerHTML = `
+        <div class="glass-strong p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Search Results</h3>
+            <span class="badge bg-indigo-500/10 text-indigo-400">${results.length} matches</span>
+          </div>
+          <div class="space-y-2">
+            ${results.map(r => `
+              <div class="flex gap-3 items-start p-2.5 rounded-lg bg-slate-800/30">
+                <div class="text-xs text-indigo-400 font-mono w-10 flex-shrink-0 text-right mt-0.5">${r.score}</div>
+                <span class="text-sm text-slate-300">${esc(r.content)}</span>
+              </div>
+            `).join("") || '<div class="text-slate-600 text-sm text-center py-2">No matches found</div>'}
+          </div>
+        </div>
+      `;
+    }
+
+    async function showContacts() {
+      const data = await api("/api/contacts");
+      const contacts = data.contacts || [];
+
+      document.getElementById("content").innerHTML = `
+        <div class="fade-in">
+          <div class="glass-strong p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Contacts</h3>
+              <span class="badge bg-pink-500/10 text-pink-400">${contacts.length}</span>
+            </div>
+            <div class="space-y-3">
+              ${contacts.map(c => {
+                const parts = c.content.split(" | ");
+                const name = parts[0] || "Unknown";
+                const details = parts.slice(1);
+                return `
+                  <div class="p-4 rounded-xl bg-slate-800/30 border border-slate-700/30">
+                    <div class="flex items-center gap-3 mb-2">
+                      <div class="w-9 h-9 rounded-xl bg-pink-500/15 flex items-center justify-center text-pink-400 font-bold text-sm">${esc(name.charAt(0).toUpperCase())}</div>
+                      <div>
+                        <div class="text-sm font-medium text-white">${esc(name)}</div>
+                        <div class="text-xs text-slate-600">${c.updated_at ? "Updated " + timeAgo(c.updated_at) : "Added " + timeAgo(c.created_at)}</div>
+                      </div>
+                    </div>
+                    ${details.length > 0 ? `
+                      <div class="ml-12 space-y-1">
+                        ${details.map(d => {
+                          const [key, ...vals] = d.split(":");
+                          const val = vals.join(":").trim();
+                          return `<div class="text-xs"><span class="text-slate-600">${esc(key.trim())}:</span> <span class="text-slate-400">${esc(val)}</span></div>`;
+                        }).join("")}
+                      </div>
+                    ` : ""}
+                  </div>
+                `;
+              }).join("") || '<div class="text-slate-600 text-sm text-center py-8">No contacts saved yet. Tell Raya about someone and she\'ll remember them.</div>'}
             </div>
           </div>
         </div>
@@ -694,7 +780,7 @@
     }
 
     // Tab navigation
-    const tabHandlers = { overview: showOverview, messages: showMessages, memory: showMemory, todos: showTodos, habits: showHabits, logs: showLogs };
+    const tabHandlers = { overview: showOverview, messages: showMessages, memory: showMemory, contacts: showContacts, todos: showTodos, habits: showHabits, logs: showLogs };
     let currentTab = "overview";
 
     document.getElementById("tabs").addEventListener("click", (e) => {

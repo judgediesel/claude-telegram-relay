@@ -35,7 +35,7 @@ import {
 } from "./config";
 
 // Memory
-import { storeMessage, initEmbeddings } from "./memory";
+import { storeMessage, initEmbeddings, autoExtractFacts } from "./memory";
 
 // Claude CLI
 import { callClaudeWithSearch, buildPrompt } from "./claude";
@@ -172,6 +172,9 @@ bot.on("message:text", async (ctx) => {
   await Promise.all(intents);
 
   await sendResponse(ctx, cleaned);
+
+  // Auto-learn facts from this conversation (async, non-blocking)
+  autoExtractFacts(text, cleaned).catch(() => {});
 });
 
 // Voice messages
@@ -214,6 +217,8 @@ bot.on("message:voice", async (ctx) => {
 
     // Always send text too (voice can be hard to hear, and shows the transcription)
     await sendResponse(ctx, `> ${transcription}\n\n${cleanedVoice}`);
+
+    autoExtractFacts(transcription, cleanedVoice).catch(() => {});
   } catch (error) {
     console.error("Voice error:", error);
     await ctx.reply("Could not process voice message.");
@@ -251,6 +256,8 @@ bot.on("message:audio", async (ctx) => {
     await Promise.all(audioIntents);
 
     await sendResponse(ctx, `> ${transcription}\n\n${cleanedAudio}`);
+
+    autoExtractFacts(transcription, cleanedAudio).catch(() => {});
   } catch (error) {
     console.error("Audio error:", error);
     await ctx.reply("Could not process audio file.");
