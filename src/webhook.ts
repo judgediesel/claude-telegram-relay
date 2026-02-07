@@ -22,6 +22,7 @@ import { callClaude, callClaudeWithSearch, buildPrompt } from "./claude";
 import { processIntents } from "./intents";
 import { sendTelegramText, sendTelegramFile, sendTelegramResponse } from "./telegram";
 import { sendSMS, escapeXml } from "./twilio";
+import { getAdsData, ADS_ENABLED } from "./ads";
 
 function jsonResponse(body: Record<string, unknown>, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -357,6 +358,7 @@ export function startWebhookServer(): void {
             habits: habits.count,
             messages: messages.count,
             calendar: CALENDAR_ENABLED,
+            ads: ADS_ENABLED,
             uptime: Math.round(process.uptime()),
           });
         }
@@ -375,6 +377,11 @@ export function startWebhookServer(): void {
             content: c.content.replace("[CONTACT] ", ""),
           }));
           return jsonResponse({ contacts });
+        }
+
+        // Ads data
+        if (url.pathname === "/api/ads") {
+          return jsonResponse(getAdsData());
         }
 
         // Memory search (semantic)

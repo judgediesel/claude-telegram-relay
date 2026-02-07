@@ -662,6 +662,81 @@ Example: ["Prefers morning meetings", "CONTACT: Sarah Chen | business partner | 
 }
 
 // ============================================================
+// VOICE MEMO ACTION ITEM EXTRACTION
+// ============================================================
+
+export async function autoExtractTodos(
+  transcription: string
+): Promise<string[]> {
+  if (!supabase || !GEMINI_API_KEY) return [];
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{
+              text: `Analyze this voice memo transcription and extract any action items, tasks, reminders, or follow-ups. Only extract CLEAR, ACTIONABLE items — not vague thoughts or observations.
+
+For each item, include a due date if one is mentioned or clearly implied (e.g., "tomorrow", "next week", "by Friday"). Format dates as YYYY-MM-DD.
+
+TRANSCRIPTION:
+${transcription}
+
+Respond with ONLY a JSON array of objects. Each object has:
+- "task": the action item (imperative form, concise)
+- "due": date string or null if no date mentioned
+
+Example: [{"task": "Call Dave about the contract", "due": "2025-02-10"}, {"task": "Order new supplements", "due": null}]
+
+If there are no action items, respond with [].`
+            }]
+          }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 500 },
+        }),
+      }
+    );
+
+    if (!res.ok) return [];
+
+    const data = await res.json();
+    const text = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || "[]";
+
+    const cleaned = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
+    let items: Array<{ task: string; due?: string | null }>;
+    try {
+      items = JSON.parse(cleaned);
+    } catch {
+      return [];
+    }
+
+    if (!Array.isArray(items) || items.length === 0) return [];
+
+    const extracted: string[] = [];
+
+    for (const item of items) {
+      if (!item.task || typeof item.task !== "string" || item.task.length < 5) continue;
+
+      await storeTodo(item.task, item.due || undefined);
+      const dueStr = item.due ? ` (due ${item.due})` : "";
+      extracted.push(`${item.task}${dueStr}`);
+    }
+
+    if (extracted.length > 0) {
+      console.log(`Voice memo: extracted ${extracted.length} action item(s)`);
+    }
+
+    return extracted;
+  } catch (error) {
+    console.error("autoExtractTodos error:", error);
+    return [];
+  }
+}
+
+// ============================================================
 // CONTACTS / CRM
 // ============================================================
 

@@ -215,6 +215,7 @@
       <div class="tab" data-tab="contacts">Contacts</div>
       <div class="tab" data-tab="todos">Todos</div>
       <div class="tab" data-tab="habits">Habits</div>
+      <div class="tab" data-tab="ads">Ads</div>
       <div class="tab" data-tab="logs">Logs</div>
     </nav>
 
@@ -779,8 +780,108 @@
       `;
     }
 
+    async function showAds() {
+      const data = await api("/api/ads");
+      const metrics = data.metrics || [];
+      const alerts = data.alerts || [];
+      const lastCheck = data.lastCheck ? formatTime(data.lastCheck) : "Never";
+
+      const totalSpend = metrics.reduce((s, m) => s + m.spend, 0);
+      const totalClicks = metrics.reduce((s, m) => s + m.clicks, 0);
+      const totalConv = metrics.reduce((s, m) => s + m.conversions, 0);
+      const totalImpr = metrics.reduce((s, m) => s + m.impressions, 0);
+
+      document.getElementById("content").innerHTML = `
+        <div class="space-y-4 fade-in">
+          ${!data.metaEnabled && !data.googleEnabled ? `
+            <div class="glass-strong p-8 text-center">
+              <div class="text-3xl mb-3">📊</div>
+              <div class="text-slate-400 mb-2">Ad monitoring not configured</div>
+              <div class="text-slate-600 text-sm">Set META_ACCESS_TOKEN + META_AD_ACCOUNT_IDS or GOOGLE_ADS_* env vars</div>
+            </div>
+          ` : `
+            <!-- Summary cards -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div class="stat-card p-4">
+                <div class="text-xs text-slate-500 uppercase tracking-wider">Total Spend</div>
+                <div class="text-2xl font-bold text-white mt-1">$${totalSpend.toFixed(0)}</div>
+                <div class="text-xs text-slate-500 mt-1">today</div>
+              </div>
+              <div class="stat-card p-4">
+                <div class="text-xs text-slate-500 uppercase tracking-wider">Impressions</div>
+                <div class="text-2xl font-bold text-white mt-1">${totalImpr.toLocaleString()}</div>
+              </div>
+              <div class="stat-card p-4">
+                <div class="text-xs text-slate-500 uppercase tracking-wider">Clicks</div>
+                <div class="text-2xl font-bold text-white mt-1">${totalClicks.toLocaleString()}</div>
+              </div>
+              <div class="stat-card p-4">
+                <div class="text-xs text-slate-500 uppercase tracking-wider">Conversions</div>
+                <div class="text-2xl font-bold text-white mt-1">${totalConv.toFixed(0)}</div>
+              </div>
+            </div>
+
+            ${alerts.length > 0 ? `
+              <div class="glass-strong p-5">
+                <h3 class="text-sm font-semibold text-red-400 uppercase tracking-wider mb-3">Alerts</h3>
+                <div class="space-y-2">
+                  ${alerts.map(a => `
+                    <div class="flex items-start gap-3 p-3 rounded-lg ${a.severity === 'critical' ? 'bg-red-500/10 border border-red-500/20' : 'bg-yellow-500/10 border border-yellow-500/20'}">
+                      <span class="text-lg">${a.severity === 'critical' ? '🔴' : '🟡'}</span>
+                      <div class="text-sm ${a.severity === 'critical' ? 'text-red-300' : 'text-yellow-300'}">${esc(a.message)}</div>
+                    </div>
+                  `).join("")}
+                </div>
+              </div>
+            ` : ""}
+
+            <!-- Per-account breakdown -->
+            <div class="glass-strong p-5">
+              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Account Performance</h3>
+              <div class="space-y-3">
+                ${metrics.length > 0 ? metrics.map(m => {
+                  const platform = m.platform === 'meta' ? 'Meta' : 'Google Ads';
+                  const platformColor = m.platform === 'meta' ? 'text-blue-400' : 'text-green-400';
+                  return `
+                    <div class="p-4 rounded-lg bg-surface-800/50 border border-slate-800/50">
+                      <div class="flex items-center justify-between mb-3">
+                        <div>
+                          <span class="font-medium ${platformColor}">${platform}</span>
+                          <span class="text-slate-500 text-sm ml-2">${esc(m.accountId)}</span>
+                        </div>
+                        <div class="text-xl font-bold text-white">$${m.spend.toFixed(0)}</div>
+                      </div>
+                      <div class="grid grid-cols-4 gap-3 text-sm">
+                        <div>
+                          <div class="text-slate-500 text-xs">CPC</div>
+                          <div class="text-slate-300">$${m.cpc.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div class="text-slate-500 text-xs">CPM</div>
+                          <div class="text-slate-300">$${m.cpm.toFixed(2)}</div>
+                        </div>
+                        <div>
+                          <div class="text-slate-500 text-xs">CTR</div>
+                          <div class="text-slate-300">${m.ctr.toFixed(2)}%</div>
+                        </div>
+                        <div>
+                          <div class="text-slate-500 text-xs">Conv Rate</div>
+                          <div class="text-slate-300">${m.conversionRate.toFixed(2)}%</div>
+                        </div>
+                      </div>
+                    </div>
+                  `;
+                }).join("") : '<div class="text-slate-600 text-center py-6">No data yet — first check runs 2 min after startup</div>'}
+              </div>
+              <div class="text-xs text-slate-600 mt-3">Last checked: ${esc(lastCheck)} &bull; Checks every 30 min</div>
+            </div>
+          `}
+        </div>
+      `;
+    }
+
     // Tab navigation
-    const tabHandlers = { overview: showOverview, messages: showMessages, memory: showMemory, contacts: showContacts, todos: showTodos, habits: showHabits, logs: showLogs };
+    const tabHandlers = { overview: showOverview, messages: showMessages, memory: showMemory, contacts: showContacts, todos: showTodos, habits: showHabits, ads: showAds, logs: showLogs };
     let currentTab = "overview";
 
     document.getElementById("tabs").addEventListener("click", (e) => {

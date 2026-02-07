@@ -17,6 +17,7 @@ import { getMemoryContext, getConversationContext, getTodoContext, getHabitConte
 import { getCalendarContext } from "./calendar";
 import { getEmailContext } from "./gmail";
 import { getWeatherContext, searchWeb } from "./search";
+import { getAdsContext, ADS_ENABLED } from "./ads";
 import type { SessionState } from "./types";
 
 // ============================================================
@@ -149,7 +150,11 @@ export async function buildPrompt(userMessage: string): Promise<string> {
     contextFetches.push(Promise.resolve(""));
   }
 
+  // Only include ads for catch-up, business, or ad-related questions
+  const isAdQuery = isCatchUp || /ads?|spend|campaign|meta|facebook|google ads|performance|roas|cpc|cpm|ctr|conversion|budget|marketing/i.test(userMessage);
+
   const [memoryContext, calendarContext, todoContext, habitContext, emailContext, contactContext, weatherContext] = await Promise.all(contextFetches);
+  const adsContext = isAdQuery && ADS_ENABLED ? getAdsContext() : "";
 
   const tagInstructions = MEMORY_ENABLED
     ? `
@@ -203,6 +208,7 @@ ${habitContext}
 ${emailContext}
 ${contactContext}
 ${weatherContext}
+${adsContext}
 ${tagInstructions}
 ${isCatchUp ? "\nThe user wants a full catch-up summary. Cover: calendar, todos, habits (streaks), emails, and anything notable. Be thorough but organized.\n" : ""}
 User: ${userMessage}

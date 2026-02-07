@@ -17,6 +17,7 @@ import { getMemoryContext, getTodoContext, getHabitContext, getContactContext, l
 import { getCalendarContext } from "./calendar";
 import { getEmailContext } from "./gmail";
 import { getWeatherContext } from "./search";
+import { getAdsContext, ADS_ENABLED } from "./ads";
 import { callClaude } from "./claude";
 import { processIntents } from "./intents";
 import { sendTelegramText } from "./telegram";
@@ -37,6 +38,7 @@ export async function runCheckin(): Promise<void> {
       getHabitContext(),
       getEmailContext(),
     ]);
+    const adsContext = ADS_ENABLED ? getAdsContext() : "";
     const lastCheckin = await getLastCheckinTime();
 
     const now = new Date();
@@ -70,6 +72,7 @@ ${calendarContext}
 ${todoContext}
 ${habitContext}
 ${emailContext}
+${adsContext}
 
 RULES:
 1. Max 2-3 check-ins per day. If you've already checked in recently, say NO.
@@ -82,6 +85,7 @@ RULES:
 8. If a habit hasn't been done today, gently nudge — don't lecture.
 9. Remember Mark has ADD — help him stay focused. If he has todos piling up, help prioritize.
 10. URGENCY: If something is truly time-critical (meeting in <10 min, critical deadline today), set ESCALATE to CALL. Otherwise ESCALATE should be NONE.
+11. If ad performance data is available, flag anomalies — zero spend, spend spikes, or major performance drops are worth mentioning. Mark runs a $3M+ performance marketing business so ad issues are high priority.
 
 RESPOND IN THIS EXACT FORMAT (no extra text):
 DECISION: YES or NO
@@ -256,6 +260,8 @@ export async function checkEndOfDayRecap(): Promise<void> {
       getEmailContext(),
     ]);
 
+    const adsContext = ADS_ENABLED ? getAdsContext() : "";
+
     const prompt = `
 ${RAYA_SYSTEM_PROMPT}
 Send Mark his end-of-day recap via Telegram.
@@ -265,12 +271,14 @@ ${memoryContext}
 ${todoContext}
 ${habitContext}
 ${recapEmailContext}
+${adsContext}
 
 Include:
 - Quick wins — what got done today based on conversation history
 - Any todos still pending — help him decide: tackle tonight or defer to tomorrow?
 - Habits done/not done today — acknowledge effort, note streaks
 - Flag any important unread emails
+- Ad performance wrap-up if available — total spend, conversions, any issues flagged today
 - Tomorrow's first calendar event (if any) so he can prep
 - A warm, genuine sign-off. You know Mark — be real, not generic.
 - Keep it concise — 5-10 lines max
@@ -332,6 +340,7 @@ export async function checkDailyBriefing(): Promise<void> {
     ]);
 
     const weatherContext = await getWeatherContext();
+    const adsContext = ADS_ENABLED ? getAdsContext() : "";
 
     const prompt = `
 ${RAYA_SYSTEM_PROMPT}
@@ -344,6 +353,7 @@ ${todoContext}
 ${habitContext}
 ${emailContext}
 ${weatherContext}
+${adsContext}
 
 Include:
 - A warm, natural greeting — you know Mark. Be real, not generic.
@@ -352,6 +362,7 @@ Include:
 - Top priority todos or goals — help him focus on what matters most today
 - Habits and current streaks — brief encouragement
 - Flag any important unread emails
+- Ad performance summary if available — spend pacing, any alerts (this is his $3M+ business, it matters)
 - If it's going to be a heavy day, acknowledge it. If it's light, say so.
 - Keep it concise — 5-10 lines max
 - Don't list sections if there's nothing to list

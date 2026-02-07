@@ -35,7 +35,7 @@ import {
 } from "./config";
 
 // Memory
-import { storeMessage, initEmbeddings, autoExtractFacts } from "./memory";
+import { storeMessage, initEmbeddings, autoExtractFacts, autoExtractTodos } from "./memory";
 
 // Claude CLI
 import { callClaudeWithSearch, buildPrompt } from "./claude";
@@ -57,6 +57,9 @@ import {
   checkDailyBriefing,
   checkEndOfDayRecap,
 } from "./checkin";
+
+// Ads monitoring
+import { checkAdPerformance, ADS_ENABLED, META_ADS_ENABLED, GOOGLE_ADS_ENABLED } from "./ads";
 
 // Webhook HTTP server
 import { startWebhookServer } from "./webhook";
@@ -218,6 +221,14 @@ bot.on("message:voice", async (ctx) => {
     // Always send text too (voice can be hard to hear, and shows the transcription)
     await sendResponse(ctx, `> ${transcription}\n\n${cleanedVoice}`);
 
+    // Auto-extract action items from voice memos (async, non-blocking)
+    autoExtractTodos(transcription).then((items) => {
+      if (items.length > 0) {
+        const itemList = items.map((i) => `• ${i}`).join("\n");
+        sendResponse(ctx, `📋 Action items captured:\n${itemList}`);
+      }
+    }).catch(() => {});
+
     autoExtractFacts(transcription, cleanedVoice).catch(() => {});
   } catch (error) {
     console.error("Voice error:", error);
@@ -373,6 +384,9 @@ console.log(`End-of-day recap: ${CHECKIN_ENABLED ? `enabled (${END_OF_DAY_HOUR}:
 console.log(`Post-meeting debrief: ${CALENDAR_ENABLED && CHECKIN_ENABLED ? "enabled" : "disabled (requires calendar + memory)"}`);
 console.log(`Reminders: ${CALENDAR_ENABLED ? "enabled (15 min before events)" : "disabled (requires calendar)"}`);
 console.log(`Check-ins: ${CHECKIN_ENABLED ? `enabled (every ${CHECKIN_INTERVAL_MINUTES} min)` : "disabled (requires memory)"}`);
+console.log(`Meta Ads: ${META_ADS_ENABLED ? "enabled" : "disabled (set META_ACCESS_TOKEN + META_AD_ACCOUNT_IDS)"}`);
+console.log(`Google Ads: ${GOOGLE_ADS_ENABLED ? "enabled" : "disabled (set GOOGLE_ADS_* env vars)"}`);
+console.log(`Voice memos: ${GEMINI_API_KEY ? "enabled (auto-extract action items)" : "disabled (set GEMINI_API_KEY)"}`);
 
 bot.start({
   onStart: () => {
@@ -398,6 +412,15 @@ bot.start({
     if (CHECKIN_ENABLED) {
       setInterval(checkDailyBriefing, 60 * 1000);
       setInterval(checkEndOfDayRecap, 60 * 1000);
+    }
+
+    // Ad performance monitoring: check every 30 minutes
+    if (ADS_ENABLED) {
+      // Initial check after 2 minutes (let everything else start first)
+      setTimeout(() => {
+        checkAdPerformance();
+        setInterval(checkAdPerformance, 30 * 60 * 1000);
+      }, 2 * 60 * 1000);
     }
   },
 });
