@@ -106,6 +106,13 @@ try {
   // Personal Gmail token not found or invalid
 }
 
+// Twilio SMS/Voice
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID || "";
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN || "";
+const TWILIO_PHONE_NUMBER = process.env.TWILIO_PHONE_NUMBER || "";
+const TWILIO_USER_PHONE = process.env.TWILIO_USER_PHONE || "";
+const TWILIO_ENABLED = !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_PHONE_NUMBER && TWILIO_USER_PHONE);
+
 // Voice support
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
@@ -777,6 +784,145 @@ async function callClaudeWithSearch(
 }
 
 // ============================================================
+// TWILIO SMS / VOICE
+// ============================================================
+
+async function sendSMS(body: string, to?: string): Promise<void> {
+  if (!TWILIO_ENABLED) return;
+
+  const recipient = to || TWILIO_USER_PHONE;
+  try {
+    const res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${btoa(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`)}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          From: TWILIO_PHONE_NUMBER,
+          To: recipient,
+          Body: body,
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error("Twilio SMS error:", err);
+      return;
+    }
+
+    console.log(`SMS sent to ${recipient}: ${body.substring(0, 60)}`);
+  } catch (error) {
+    console.error("sendSMS error:", error);
+  }
+}
+
+async function makeCall(message: string, to?: string): Promise<void> {
+  if (!TWILIO_ENABLED) return;
+
+  const recipient = to || TWILIO_USER_PHONE;
+  let twiml: string;
+
+  // Try ElevenLabs voice → temp-hosted audio → Twilio <Play>
+  if (ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID) {
+    try {
+      const audioRes = await fetch(
+        `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+        {
+          method: "POST",
+          headers: {
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: message,
+            model_id: "eleven_monolingual_v1",
+            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+          }),
+        }
+      );
+
+      if (audioRes.ok) {
+        const audioBuffer = await audioRes.arrayBuffer();
+        const tempPath = join(TEMP_DIR, `call-${Date.now()}.mp3`);
+        await writeFile(tempPath, Buffer.from(audioBuffer));
+
+        // Upload to temp host for a public URL
+        const formData = new FormData();
+        formData.append("reqtype", "fileupload");
+        formData.append("time", "1h");
+        formData.append("fileToUpload", new Blob([audioBuffer], { type: "audio/mpeg" }), "call.mp3");
+
+        const uploadRes = await fetch("https://litterbox.catbox.moe/resources/internals/api.php", {
+          method: "POST",
+          body: formData,
+        });
+
+        if (uploadRes.ok) {
+          const audioUrl = (await uploadRes.text()).trim();
+          twiml = `<Response><Play>${escapeXml(audioUrl)}</Play><Pause length="1"/><Play>${escapeXml(audioUrl)}</Play></Response>`;
+          console.log(`Call using ElevenLabs voice: ${audioUrl}`);
+        } else {
+          console.error("Audio upload error:", uploadRes.status);
+          twiml = `<Response><Say voice="Polly.Matthew">${escapeXml(message)}</Say><Pause length="1"/><Say voice="Polly.Matthew">${escapeXml(message)}</Say></Response>`;
+        }
+
+        // Clean up local temp file
+        unlink(tempPath).catch(() => {});
+      } else {
+        console.error("ElevenLabs TTS error:", audioRes.status);
+        twiml = `<Response><Say voice="Polly.Matthew">${escapeXml(message)}</Say><Pause length="1"/><Say voice="Polly.Matthew">${escapeXml(message)}</Say></Response>`;
+      }
+    } catch (error) {
+      console.error("ElevenLabs call error:", error);
+      twiml = `<Response><Say voice="Polly.Matthew">${escapeXml(message)}</Say><Pause length="1"/><Say voice="Polly.Matthew">${escapeXml(message)}</Say></Response>`;
+    }
+  } else {
+    twiml = `<Response><Say voice="Polly.Matthew">${escapeXml(message)}</Say><Pause length="1"/><Say voice="Polly.Matthew">${escapeXml(message)}</Say></Response>`;
+  }
+
+  try {
+    const res = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${btoa(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`)}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          From: TWILIO_PHONE_NUMBER,
+          To: recipient,
+          Twiml: twiml,
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const err = await res.text();
+      console.error("Twilio Call error:", err);
+      return;
+    }
+
+    console.log(`Call initiated to ${recipient}: ${message.substring(0, 60)}`);
+  } catch (error) {
+    console.error("makeCall error:", error);
+  }
+}
+
+function escapeXml(str: string): string {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+// ============================================================
 // INTENT DETECTION
 // ============================================================
 
@@ -850,6 +996,18 @@ function processIntents(response: string): { cleaned: string; intents: Promise<v
   // [HABIT_REMOVE: search text]
   for (const match of response.matchAll(/\[HABIT_REMOVE:\s*(.+?)\]/gi)) {
     intents.push(removeHabit(match[1].trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [SMS: message text]
+  for (const match of response.matchAll(/\[SMS:\s*(.+?)\]/gi)) {
+    intents.push(sendSMS(match[1].trim()));
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [CALL: message text]
+  for (const match of response.matchAll(/\[CALL:\s*(.+?)\]/gi)) {
+    intents.push(makeCall(match[1].trim()));
     cleaned = cleaned.replace(match[0], "");
   }
 
@@ -1499,6 +1657,10 @@ Calendar:${CALENDAR_ENABLED ? `
 Web Search:${GEMINI_API_KEY ? `
 - [SEARCH: query] — Search the web for current information. Use when asked about news, weather, prices, current events, or anything you don't know.` : " (disabled)"}
 
+SMS/Phone:${TWILIO_ENABLED ? `
+- [SMS: message text] — Send an SMS to the user's phone. Use for urgent reminders or when the user asks you to text them.
+- [CALL: message text] — Call the user's phone and speak a message. Use only for critical/emergency alerts or when the user explicitly asks.` : " (disabled)"}
+
 Rules:
 - Use tags sparingly. Most messages need zero tags.
 - Never mention these tags to the user or explain the system.
@@ -1674,6 +1836,52 @@ if (WEBHOOK_SECRET) {
       // Health check — no auth required
       if (req.method === "GET" && url.pathname === "/health") {
         return jsonResponse({ ok: true });
+      }
+
+      // Twilio incoming SMS webhook — no bearer auth (Twilio POSTs form data)
+      if (req.method === "POST" && url.pathname === "/twilio/sms" && TWILIO_ENABLED) {
+        try {
+          const formData = await req.formData();
+          const from = formData.get("From")?.toString() || "";
+          const body = formData.get("Body")?.toString() || "";
+
+          // Only accept messages from the authorized user's phone
+          if (from !== TWILIO_USER_PHONE) {
+            console.log(`Twilio SMS from unknown number: ${from}`);
+            return new Response("<Response/>", { headers: { "Content-Type": "text/xml" } });
+          }
+
+          console.log(`Incoming SMS from ${from}: ${body.substring(0, 60)}`);
+
+          // Process through Claude (async — respond to Twilio immediately)
+          (async () => {
+            try {
+              await storeMessage("user", body, { source: "sms" });
+              const enrichedPrompt = await buildPrompt(body);
+              const response = await callClaudeWithSearch(enrichedPrompt, { resume: true });
+              const { cleaned, intents } = processIntents(response);
+              await Promise.all(intents);
+              await storeMessage("assistant", cleaned, { source: "sms" });
+
+              // Reply via SMS (truncate to 1600 chars — SMS limit)
+              const smsReply = cleaned.length > 1500
+                ? cleaned.substring(0, 1500) + "..."
+                : cleaned;
+              await sendSMS(smsReply);
+
+              // Also forward to Telegram for visibility
+              await sendTelegramText(`[via SMS] ${from}: ${body}\n\nRaya: ${cleaned}`);
+            } catch (error) {
+              console.error("Incoming SMS processing error:", error);
+            }
+          })();
+
+          // Respond to Twilio immediately with empty TwiML (we send reply via API)
+          return new Response("<Response/>", { headers: { "Content-Type": "text/xml" } });
+        } catch (error) {
+          console.error("Twilio webhook error:", error);
+          return new Response("<Response/>", { headers: { "Content-Type": "text/xml" } });
+        }
       }
 
       // Auth: Bearer token in header OR ?token= query param (for browser dashboard)
@@ -2079,6 +2287,7 @@ console.log(`Web search: ${GEMINI_API_KEY ? "enabled (Gemini)" : "disabled (set 
 console.log(`Todos: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
 console.log(`Habits: ${MEMORY_ENABLED ? "enabled" : "disabled (requires memory)"}`);
 console.log(`Gmail: ${GMAIL_ENABLED ? `enabled (${gmailClients.map(c => c.label).join(", ")})` : "disabled (set GMAIL_USER)"}`);
+console.log(`Twilio SMS: ${TWILIO_ENABLED ? `enabled (${TWILIO_PHONE_NUMBER})` : "disabled (set TWILIO_ACCOUNT_SID + TWILIO_AUTH_TOKEN + TWILIO_PHONE_NUMBER + TWILIO_USER_PHONE)"}`);
 console.log(`Daily briefing: ${CHECKIN_ENABLED ? `enabled (${DAILY_BRIEFING_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`End-of-day recap: ${CHECKIN_ENABLED ? `enabled (${END_OF_DAY_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`Post-meeting debrief: ${CALENDAR_ENABLED && CHECKIN_ENABLED ? "enabled" : "disabled (requires calendar + memory)"}`);
