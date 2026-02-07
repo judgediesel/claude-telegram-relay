@@ -56,6 +56,7 @@ import {
   checkPostMeetingDebrief,
   checkDailyBriefing,
   checkEndOfDayRecap,
+  checkWeeklyHabitReport,
 } from "./checkin";
 
 // Ads monitoring
@@ -384,6 +385,7 @@ console.log(`End-of-day recap: ${CHECKIN_ENABLED ? `enabled (${END_OF_DAY_HOUR}:
 console.log(`Post-meeting debrief: ${CALENDAR_ENABLED && CHECKIN_ENABLED ? "enabled" : "disabled (requires calendar + memory)"}`);
 console.log(`Reminders: ${CALENDAR_ENABLED ? "enabled (15 min before events)" : "disabled (requires calendar)"}`);
 console.log(`Check-ins: ${CHECKIN_ENABLED ? `enabled (every ${CHECKIN_INTERVAL_MINUTES} min)` : "disabled (requires memory)"}`);
+console.log(`Weekly habit report: ${CHECKIN_ENABLED ? "enabled (Sundays 5 PM)" : "disabled (requires memory)"}`);
 console.log(`Meta Ads: ${META_ADS_ENABLED ? "enabled" : "disabled (set META_ACCESS_TOKEN + META_AD_ACCOUNT_IDS)"}`);
 console.log(`Google Ads: ${GOOGLE_ADS_ENABLED ? "enabled" : "disabled (set GOOGLE_ADS_* env vars)"}`);
 console.log(`Voice memos: ${GEMINI_API_KEY ? "enabled (auto-extract action items)" : "disabled (set GEMINI_API_KEY)"}`);
@@ -408,10 +410,11 @@ bot.start({
       }
     }
 
-    // Daily briefing + end-of-day recap: check every minute
+    // Daily briefing + end-of-day recap + weekly habit report: check every minute
     if (CHECKIN_ENABLED) {
       setInterval(checkDailyBriefing, 60 * 1000);
       setInterval(checkEndOfDayRecap, 60 * 1000);
+      setInterval(checkWeeklyHabitReport, 60 * 1000);
     }
 
     // Ad performance monitoring: check every 30 minutes

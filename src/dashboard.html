@@ -696,10 +696,21 @@
     }
 
     async function showHabits() {
-      const data = await api("/api/habits");
-      const habits = data.habits || [];
+      const [habitsData, analyticsData] = await Promise.all([
+        api("/api/habits"),
+        api("/api/habits/analytics"),
+      ]);
+      const habits = habitsData.habits || [];
+      const analytics = analyticsData.analytics || [];
       const todayStr = new Date().toLocaleDateString("en-US");
-      const done = habits.filter(h => h.updated_at && new Date(h.updated_at).toLocaleDateString("en-US") === todayStr).length;
+      const done = analytics.filter(a => a.doneToday).length;
+      const total = analytics.length || habits.length;
+      const avgRate = analytics.length > 0
+        ? Math.round(analytics.reduce((s, a) => s + a.completionRate7d, 0) / analytics.length)
+        : 0;
+
+      // Merge analytics into habits by ID
+      const analyticsMap = new Map(analytics.map(a => [a.id, a]));
 
       document.getElementById("content").innerHTML = `
         <div class="fade-in">
@@ -713,39 +724,75 @@
             <button onclick="addHabit()" class="btn btn-primary px-4 py-2">Add</button>
           </div>
 
-          <div class="glass-strong p-6 mb-4 flex items-center justify-between">
-            <div>
-              <h3 class="text-lg font-semibold text-white">Daily Habits</h3>
-              <p class="text-sm text-slate-500 mt-1">${done} of ${habits.length} completed today</p>
+          <!-- Summary Cards -->
+          <div class="grid grid-cols-3 gap-3 mb-4">
+            <div class="stat-card p-4 text-center">
+              <div class="text-2xl font-bold text-white">${done}/${total}</div>
+              <div class="text-xs text-slate-500 mt-1">Done Today</div>
             </div>
-            ${progressCircle(done, habits.length, "#22c55e")}
+            <div class="stat-card p-4 text-center">
+              <div class="text-2xl font-bold ${avgRate >= 70 ? 'text-emerald-400' : avgRate >= 40 ? 'text-amber-400' : 'text-red-400'}">${avgRate}%</div>
+              <div class="text-xs text-slate-500 mt-1">7-Day Avg</div>
+            </div>
+            <div class="stat-card p-4 text-center">
+              <div class="text-2xl font-bold streak-fire">${Math.max(...analytics.map(a => a.currentStreak), 0)}</div>
+              <div class="text-xs text-slate-500 mt-1">Best Active Streak</div>
+            </div>
           </div>
 
           <div class="space-y-3">
             ${habits.map(h => {
-              const isDone = h.updated_at && new Date(h.updated_at).toLocaleDateString("en-US") === todayStr;
-              const streak = h.priority || 0;
+              const a = analyticsMap.get(h.id);
+              const isDone = a ? a.doneToday : (h.updated_at && new Date(h.updated_at).toLocaleDateString("en-US") === todayStr);
+              const streak = a ? a.currentStreak : (h.priority || 0);
+              const bestStreak = a ? a.bestStreak : streak;
+              const rate7d = a ? a.completionRate7d : 0;
+              const weekHistory = a ? a.weekHistory : [];
+              const optimalHour = a ? a.optimalHour : null;
+
+              const rateColor = rate7d >= 70 ? "text-emerald-400" : rate7d >= 40 ? "text-amber-400" : "text-red-400";
+              const rateBg = rate7d >= 70 ? "bg-emerald-500/10" : rate7d >= 40 ? "bg-amber-500/10" : "bg-red-500/10";
+
+              // 7-day heatmap
+              const days = ["S","M","T","W","T","F","S"];
+              const now = new Date();
+              const heatmap = weekHistory.map((done, i) => {
+                const d = new Date(now);
+                d.setDate(d.getDate() - i);
+                const dayLabel = days[d.getDay()];
+                return `<div class="flex flex-col items-center gap-0.5">
+                  <div class="text-[10px] text-slate-600">${dayLabel}</div>
+                  <div class="w-5 h-5 rounded ${done ? 'bg-emerald-500/40' : 'bg-slate-800'}" title="${done ? 'Done' : 'Missed'}"></div>
+                </div>`;
+              }).reverse().join("");
+
               return `
-                <div class="glass-strong p-4 flex items-center justify-between">
-                  <div class="flex items-center gap-3">
-                    ${isDone
-                      ? `<div class="w-8 h-8 rounded-xl flex items-center justify-center text-sm bg-emerald-500/20 text-emerald-400">&#10003;</div>`
-                      : `<button onclick="completeHabit('${h.id}')" class="w-8 h-8 rounded-xl flex items-center justify-center text-sm bg-slate-700/50 text-slate-500 hover:bg-emerald-500/20 hover:text-emerald-400 transition-colors cursor-pointer" title="Mark done">&#9675;</button>`
-                    }
-                    <div>
-                      <div class="text-sm font-medium ${isDone ? "text-slate-200" : "text-slate-400"}">${esc(h.content)}</div>
-                      <div class="text-xs text-slate-600">${h.deadline || "daily"} ${h.updated_at ? `&middot; Last: ${timeAgo(h.updated_at)}` : ""}</div>
+                <div class="glass-strong p-4">
+                  <div class="flex items-center justify-between mb-3">
+                    <div class="flex items-center gap-3">
+                      ${isDone
+                        ? '<div class="w-8 h-8 rounded-xl flex items-center justify-center text-sm bg-emerald-500/20 text-emerald-400">&#10003;</div>'
+                        : `<button onclick="completeHabit('${h.id}')" class="w-8 h-8 rounded-xl flex items-center justify-center text-sm bg-slate-700/50 text-slate-500 hover:bg-emerald-500/20 hover:text-emerald-400 transition-colors cursor-pointer" title="Mark done">&#9675;</button>`
+                      }
+                      <div>
+                        <div class="text-sm font-medium ${isDone ? 'text-slate-200' : 'text-slate-400'}">${esc(h.content)}</div>
+                        <div class="text-xs text-slate-600">${h.deadline || "daily"}${optimalHour !== null ? ` &middot; Usually ~${optimalHour > 12 ? (optimalHour - 12) + ' PM' : optimalHour + ' AM'}` : ''}</div>
+                      </div>
+                    </div>
+                    <div class="flex items-center gap-4">
+                      <div class="text-right">
+                        ${streak > 0 ? `
+                          <div class="streak-fire text-lg font-bold">${streak}</div>
+                          <div class="text-xs text-slate-600">${bestStreak > streak ? `best: ${bestStreak}` : 'day streak'}</div>
+                        ` : bestStreak > 0 ? `<div class="text-xs text-slate-600">best: ${bestStreak}</div>` : '<div class="text-xs text-slate-700">No streak</div>'}
+                      </div>
+                      <span class="badge ${rateBg} ${rateColor}">${rate7d}%</span>
+                      <button onclick="removeHabit('${h.id}', '${esc(h.content).replace(/'/g, "\\\\'")}')" class="text-slate-700 hover:text-red-400 text-xs transition-colors" title="Remove">&#10005;</button>
                     </div>
                   </div>
-                  <div class="flex items-center gap-3">
-                    <div class="text-right">
-                      ${streak > 0 ? `
-                        <div class="streak-fire text-lg font-bold">${streak}</div>
-                        <div class="text-xs text-slate-600">day streak</div>
-                      ` : '<div class="text-xs text-slate-700">No streak</div>'}
-                    </div>
-                    <button onclick="removeHabit('${h.id}', '${esc(h.content).replace(/'/g, "\\\'")}')" class="btn btn-danger text-xs opacity-0 group-hover:opacity-100" title="Remove">&#10005;</button>
-                  </div>
+                  ${weekHistory.length > 0 ? `
+                    <div class="flex gap-1.5 justify-end">${heatmap}</div>
+                  ` : ''}
                 </div>
               `;
             }).join("") || '<div class="glass-strong p-8 text-slate-600 text-center">No habits tracked yet</div>'}

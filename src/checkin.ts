@@ -13,7 +13,7 @@ import {
   calendarClient,
   GOOGLE_CALENDAR_ID,
 } from "./config";
-import { getMemoryContext, getTodoContext, getHabitContext, getContactContext, logCheckin, getLastCheckinTime, storeMessage } from "./memory";
+import { getMemoryContext, getTodoContext, getHabitContext, getContactContext, logCheckin, getLastCheckinTime, storeMessage, getHabitAnalytics } from "./memory";
 import { getCalendarContext } from "./calendar";
 import { getEmailContext } from "./gmail";
 import { getWeatherContext } from "./search";
@@ -380,5 +380,87 @@ Include:
     console.log("Daily briefing sent");
   } catch (error) {
     console.error("Daily briefing error:", error);
+  }
+}
+
+// ============================================================
+// WEEKLY HABIT REPORT (Sunday evenings)
+// ============================================================
+
+let lastWeeklyReportWeek = "";
+
+export async function checkWeeklyHabitReport(): Promise<void> {
+  if (!CHECKIN_ENABLED) return;
+
+  const now = new Date();
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const dayOfWeek = now.getDay(); // 0 = Sunday
+  const hour = now.getHours();
+
+  // Only send on Sunday between 5-6 PM
+  if (dayOfWeek !== 0 || hour !== 17) return;
+  if (now.getMinutes() > 30) return;
+
+  // Deduplicate by week number
+  const weekNum = `${now.getFullYear()}-W${Math.ceil((now.getTime() - new Date(now.getFullYear(), 0, 1).getTime()) / (7 * 24 * 60 * 60 * 1000))}`;
+  if (lastWeeklyReportWeek === weekNum) return;
+  lastWeeklyReportWeek = weekNum;
+
+  try {
+    const analytics = await getHabitAnalytics();
+    if (analytics.length === 0) return;
+
+    const timeStr = now.toLocaleString("en-US", {
+      timeZone: tz,
+      weekday: "long",
+      month: "long",
+      day: "numeric",
+    });
+
+    // Build structured data for Claude
+    const habitData = analytics.map((h) => {
+      const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+      const weekViz = h.weekHistory.map((done, i) => {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        return `${days[d.getDay()]}: ${done ? "✓" : "✗"}`;
+      }).reverse().join(", ");
+
+      return `- ${h.content} (${h.frequency}): ${h.completionRate7d}% this week | streak: ${h.currentStreak} (best: ${h.bestStreak}) | ${weekViz}${h.optimalHour !== null ? ` | usually done around ${h.optimalHour}:00` : ""}`;
+    }).join("\n");
+
+    const avgRate = Math.round(analytics.reduce((s, h) => s + h.completionRate7d, 0) / analytics.length);
+
+    const prompt = `
+${RAYA_SYSTEM_PROMPT}
+Send Mark his weekly habit report. Today is ${timeStr}.
+
+HABIT PERFORMANCE THIS WEEK:
+${habitData}
+
+OVERALL: ${avgRate}% average completion rate across ${analytics.length} habits
+
+Write a brief, warm weekly habit report (5-8 lines). Include:
+- Overall score and how this week went
+- Call out wins — any strong streaks or consistent habits
+- Gently flag habits that need attention (low completion rate)
+- If a habit has an optimal time pattern, mention it as a tip
+- If a best streak was broken, acknowledge it without guilt
+- End with a motivating thought for next week
+- Remember Mark has ADD — frame it as progress, not perfection
+- Don't be preachy about health/habits. Celebrate effort.
+`.trim();
+
+    console.log("Sending weekly habit report...");
+    const response = await callClaude(prompt);
+
+    const { cleaned, intents } = processIntents(response);
+    await Promise.all(intents);
+    await storeMessage("assistant", cleaned, { source: "weekly_habit_report" });
+    await sendTelegramText(cleaned);
+    await logCheckin("YES", "Weekly habit report", cleaned);
+    console.log("Weekly habit report sent");
+  } catch (error) {
+    console.error("Weekly habit report error:", error);
   }
 }

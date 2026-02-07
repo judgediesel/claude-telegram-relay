@@ -17,7 +17,7 @@ import {
   TEMP_DIR,
   MAX_FILE_SIZE,
 } from "./config";
-import { storeMessage, storeTodo, storeHabit, completeTodo, completeHabit, searchMemory, autoExtractFacts } from "./memory";
+import { storeMessage, storeTodo, storeHabit, completeTodo, completeHabit, searchMemory, autoExtractFacts, getHabitAnalytics } from "./memory";
 import { callClaude, callClaudeWithSearch, buildPrompt } from "./claude";
 import { processIntents } from "./intents";
 import { sendTelegramText, sendTelegramFile, sendTelegramResponse } from "./telegram";
@@ -333,6 +333,11 @@ export function startWebhookServer(): void {
           return jsonResponse({ habits: data });
         }
 
+        if (url.pathname === "/api/habits/analytics" && supabase) {
+          const analytics = await getHabitAnalytics();
+          return jsonResponse({ analytics });
+        }
+
         if (url.pathname === "/api/logs" && supabase) {
           const { data } = await supabase.from("logs").select("*").order("created_at", { ascending: false }).limit(50);
           return jsonResponse({ logs: data });
@@ -401,38 +406,15 @@ export function startWebhookServer(): void {
         try {
           const body = (await req.json()) as { id?: string; searchText?: string };
           if (body.id && supabase) {
-            const now = new Date();
-            const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-            const todayStr = now.toLocaleDateString("en-US", { timeZone: tz });
-
-            // Get habit details
+            // Look up habit content to use completeHabit (which handles streak, grace days, logging)
             const { data: habits } = await supabase
               .from("memory")
-              .select("id, content, priority, updated_at")
+              .select("content")
               .eq("id", body.id)
               .limit(1);
 
             if (habits && habits.length > 0) {
-              const habit = habits[0];
-              const lastDone = habit.updated_at
-                ? new Date(habit.updated_at).toLocaleDateString("en-US", { timeZone: tz })
-                : "";
-
-              if (lastDone === todayStr) {
-                return jsonResponse({ ok: true, message: "Already done today" });
-              }
-
-              const yesterday = new Date(now);
-              yesterday.setDate(yesterday.getDate() - 1);
-              const yesterdayStr = yesterday.toLocaleDateString("en-US", { timeZone: tz });
-              const newStreak = lastDone === yesterdayStr ? (habit.priority || 0) + 1 : 1;
-
-              await supabase
-                .from("memory")
-                .update({ priority: newStreak, updated_at: now.toISOString() })
-                .eq("id", habit.id);
-
-              return jsonResponse({ ok: true, streak: newStreak });
+              await completeHabit(habits[0].content);
             }
           } else if (body.searchText) {
             await completeHabit(body.searchText);

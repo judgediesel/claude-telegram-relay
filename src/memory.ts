@@ -484,7 +484,7 @@ export async function completeHabit(searchText: string): Promise<void> {
   try {
     const { data: habits } = await supabase
       .from("memory")
-      .select("id, content, priority, updated_at")
+      .select("id, content, priority, updated_at, metadata")
       .eq("type", "habit")
       .ilike("content", `%${searchText}%`)
       .limit(1);
@@ -508,25 +508,58 @@ export async function completeHabit(searchText: string): Promise<void> {
       }
     }
 
-    // Calculate streak: was it done yesterday?
+    // Calculate streak with 1-day grace period
     const yesterday = new Date(now);
     yesterday.setDate(yesterday.getDate() - 1);
+    const dayBefore = new Date(now);
+    dayBefore.setDate(dayBefore.getDate() - 2);
     const yesterdayStr = yesterday.toLocaleDateString("en-US", { timeZone: tz });
+    const dayBeforeStr = dayBefore.toLocaleDateString("en-US", { timeZone: tz });
     const lastDoneStr = habit.updated_at
       ? new Date(habit.updated_at).toLocaleDateString("en-US", { timeZone: tz })
       : "";
 
-    const newStreak = lastDoneStr === yesterdayStr ? (habit.priority || 0) + 1 : 1;
+    let newStreak: number;
+    if (lastDoneStr === yesterdayStr) {
+      // Done yesterday — continue streak
+      newStreak = (habit.priority || 0) + 1;
+    } else if (lastDoneStr === dayBeforeStr) {
+      // Missed 1 day (grace period) — keep streak, don't increment
+      newStreak = Math.max(habit.priority || 1, 1);
+    } else {
+      // Missed 2+ days — reset
+      newStreak = 1;
+    }
+
+    // Track best streak in metadata
+    const meta = (habit.metadata && typeof habit.metadata === "object") ? { ...habit.metadata as Record<string, unknown> } : {};
+    const bestStreak = Math.max(newStreak, (meta.bestStreak as number) || 0);
+    meta.bestStreak = bestStreak;
 
     await supabase
       .from("memory")
       .update({
         priority: newStreak,
         updated_at: now.toISOString(),
+        metadata: meta,
       })
       .eq("id", habit.id);
 
-    console.log(`Habit done: ${habit.content} (streak: ${newStreak})`);
+    // Log individual completion for analytics
+    await supabase.from("logs").insert({
+      event: "habit_complete",
+      message: habit.content,
+      metadata: {
+        habit_id: habit.id,
+        streak: newStreak,
+        bestStreak,
+        hour: now.getHours(),
+        dayOfWeek: now.getDay(),
+      },
+    }).catch(() => {});
+
+    const bestStr = bestStreak > newStreak ? ` (best: ${bestStreak})` : "";
+    console.log(`Habit done: ${habit.content} (streak: ${newStreak}${bestStr})`);
   } catch (error) {
     console.error("completeHabit error:", error);
   }
@@ -557,26 +590,81 @@ export async function getHabitContext(): Promise<string> {
   try {
     const { data: habits } = await supabase
       .from("memory")
-      .select("content, deadline, priority, updated_at")
+      .select("id, content, deadline, priority, updated_at, metadata")
       .eq("type", "habit")
       .order("created_at", { ascending: true });
 
     if (!habits || habits.length === 0) return "";
 
+    const now = new Date();
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    const todayStr = new Date().toLocaleDateString("en-US", { timeZone: tz });
+    const todayStr = now.toLocaleDateString("en-US", { timeZone: tz });
+    const hour = now.getHours();
+
+    // Get recent completion logs for time-of-day insights
+    const { data: recentLogs } = await supabase
+      .from("logs")
+      .select("metadata, created_at")
+      .eq("event", "habit_complete")
+      .order("created_at", { ascending: false })
+      .limit(200);
+
+    // Build per-habit insights from logs
+    const habitLogs = new Map<string, { hours: number[]; completions7d: number }>();
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+    for (const log of recentLogs || []) {
+      const meta = log.metadata as Record<string, unknown> | null;
+      const habitId = meta?.habit_id as string;
+      if (!habitId) continue;
+
+      const entry = habitLogs.get(habitId) || { hours: [], completions7d: 0 };
+      entry.hours.push((meta?.hour as number) || 0);
+      if (new Date(log.created_at) > sevenDaysAgo) {
+        entry.completions7d++;
+      }
+      habitLogs.set(habitId, entry);
+    }
 
     let context = "\nHABITS:\n";
     context += habits
       .map((h) => {
         const streak = h.priority || 0;
+        const meta = (h.metadata && typeof h.metadata === "object") ? h.metadata as Record<string, unknown> : {};
+        const bestStreak = (meta.bestStreak as number) || streak;
         const lastDone = h.updated_at
           ? new Date(h.updated_at).toLocaleDateString("en-US", { timeZone: tz })
           : "";
         const doneToday = lastDone === todayStr;
         const status = doneToday ? "DONE" : "NOT YET";
-        const streakStr = streak > 0 ? ` (${streak}-day streak)` : "";
-        return `- [${status}] ${h.content} — ${h.deadline}${streakStr}`;
+
+        // Streak info
+        let streakStr = "";
+        if (streak > 0) {
+          streakStr = ` (${streak}-day streak`;
+          if (bestStreak > streak) streakStr += `, best: ${bestStreak}`;
+          streakStr += ")";
+        } else if (bestStreak > 0) {
+          streakStr = ` (best streak was ${bestStreak} days)`;
+        }
+
+        // Completion rate (7 days)
+        const logs = habitLogs.get(h.id);
+        const rate7d = logs ? Math.round((logs.completions7d / 7) * 100) : 0;
+        const rateStr = logs && logs.completions7d > 0 ? ` — ${rate7d}% this week` : "";
+
+        // Optimal time hint (only if not done today and we have data)
+        let timeHint = "";
+        if (!doneToday && logs && logs.hours.length >= 3) {
+          const avgHour = Math.round(logs.hours.reduce((s, h) => s + h, 0) / logs.hours.length);
+          if (hour >= avgHour && hour <= avgHour + 2) {
+            timeHint = " ⏰ Usually done around now";
+          } else if (hour > avgHour + 2) {
+            timeHint = " ⚠️ Usually done earlier";
+          }
+        }
+
+        return `- [${status}] ${h.content} — ${h.deadline}${streakStr}${rateStr}${timeHint}`;
       })
       .join("\n");
 
@@ -584,6 +672,113 @@ export async function getHabitContext(): Promise<string> {
   } catch (error) {
     console.error("getHabitContext error:", error);
     return "";
+  }
+}
+
+// ============================================================
+// HABIT ANALYTICS (for dashboard and reports)
+// ============================================================
+
+export interface HabitAnalytics {
+  id: string;
+  content: string;
+  frequency: string;
+  currentStreak: number;
+  bestStreak: number;
+  doneToday: boolean;
+  completionRate7d: number;
+  completionRate30d: number;
+  optimalHour: number | null;
+  weekHistory: boolean[]; // last 7 days, most recent first
+  lastDone: string | null;
+}
+
+export async function getHabitAnalytics(): Promise<HabitAnalytics[]> {
+  if (!supabase) return [];
+
+  try {
+    const { data: habits } = await supabase
+      .from("memory")
+      .select("id, content, deadline, priority, updated_at, metadata")
+      .eq("type", "habit")
+      .order("created_at", { ascending: true });
+
+    if (!habits || habits.length === 0) return [];
+
+    const now = new Date();
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const todayStr = now.toLocaleDateString("en-US", { timeZone: tz });
+
+    // Get all habit completion logs
+    const { data: allLogs } = await supabase
+      .from("logs")
+      .select("metadata, created_at")
+      .eq("event", "habit_complete")
+      .order("created_at", { ascending: false })
+      .limit(1000);
+
+    // Index logs by habit ID
+    const logsByHabit = new Map<string, Array<{ date: string; hour: number; created_at: string }>>();
+    for (const log of allLogs || []) {
+      const meta = log.metadata as Record<string, unknown> | null;
+      const habitId = meta?.habit_id as string;
+      if (!habitId) continue;
+
+      const entries = logsByHabit.get(habitId) || [];
+      entries.push({
+        date: new Date(log.created_at).toLocaleDateString("en-US", { timeZone: tz }),
+        hour: (meta?.hour as number) || 0,
+        created_at: log.created_at,
+      });
+      logsByHabit.set(habitId, entries);
+    }
+
+    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+
+    return habits.map((h) => {
+      const meta = (h.metadata && typeof h.metadata === "object") ? h.metadata as Record<string, unknown> : {};
+      const logs = logsByHabit.get(h.id) || [];
+      const lastDone = h.updated_at
+        ? new Date(h.updated_at).toLocaleDateString("en-US", { timeZone: tz })
+        : null;
+
+      // Completion counts
+      const completions7d = logs.filter((l) => new Date(l.created_at) > sevenDaysAgo).length;
+      const completions30d = logs.filter((l) => new Date(l.created_at) > thirtyDaysAgo).length;
+
+      // Optimal hour
+      const hours = logs.map((l) => l.hour);
+      const optimalHour = hours.length >= 3
+        ? Math.round(hours.reduce((s, h) => s + h, 0) / hours.length)
+        : null;
+
+      // 7-day history (was it done each day?)
+      const weekHistory: boolean[] = [];
+      for (let i = 0; i < 7; i++) {
+        const d = new Date(now);
+        d.setDate(d.getDate() - i);
+        const dayStr = d.toLocaleDateString("en-US", { timeZone: tz });
+        weekHistory.push(logs.some((l) => l.date === dayStr));
+      }
+
+      return {
+        id: h.id,
+        content: h.content,
+        frequency: h.deadline || "daily",
+        currentStreak: h.priority || 0,
+        bestStreak: Math.max((meta.bestStreak as number) || 0, h.priority || 0),
+        doneToday: lastDone === todayStr,
+        completionRate7d: Math.round((completions7d / 7) * 100),
+        completionRate30d: Math.round((completions30d / 30) * 100),
+        optimalHour,
+        weekHistory,
+        lastDone: h.updated_at || null,
+      };
+    });
+  } catch (error) {
+    console.error("getHabitAnalytics error:", error);
+    return [];
   }
 }
 
