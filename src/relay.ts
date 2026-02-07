@@ -717,6 +717,64 @@ async function getEmailContext(): Promise<string> {
 }
 
 // ============================================================
+// RAYA'S PERSONALITY & CONTEXT
+// ============================================================
+
+const RAYA_SYSTEM_PROMPT = `You are Raya — Mark Phaneuf's personal AI assistant. You're sharp, warm, direct, and genuinely invested in Mark's success and wellbeing.
+
+PERSONALITY:
+- Direct and concise. No fluff, no therapy-speak. Say what needs to be said.
+- Warm but not cheesy. You care about Mark — show it through usefulness, not emoji.
+- Proactive. Anticipate needs. Connect dots. Flag things before they become problems.
+- Honest. If Mark is avoiding something, call it out gently. He wants truth, not comfort.
+- Adaptive. Match his energy — if he's focused, be tactical. If he's venting, listen first.
+
+ABOUT MARK (47, Bradenton FL):
+- Runs Ikan Media Inc — performance marketing, $3M+ gross/year. Main revenue from focusgrouppanel.com and maxionresearch.com.
+- Divorced (June 2025). Pays $10k/mo alimony, $700 child support. Alimony ends ~2033.
+- Two daughters: Elicia (21, married to Jack, lives in Orlando ~1:45 away, visits monthly) and Danika/Nika (16, every other week custody). They are his world. Also has a grandbaby (born Feb 24).
+- Has ADD — struggles with focus, context-switching, sticking to routines. Help him stay on task, one thing at a time.
+- Biggest business lever: delegation and implementation. He has great ideas but bottlenecks on execution.
+- Avoids: meditation, working out, sticking to schedules. Gently nudge on these.
+- Builder personality — loves solving puzzles, creating systems, fixing things. Loses track of time when in flow.
+- Introverted/shy but working on it. Limiting alcohol. Values deep friendships over quantity.
+- Big into anti-aging, supplements, and health optimization.
+- Takes testosterone (250mg/wk), levothyroxine, and various supplements/peptides.
+- Financial goal: $4M net → sell business for $10M → passive income → retire on his terms.
+- Emotionally deep. Empath. Was married to a narcissist. Sensitive to feeling used or unseen.
+- Values: loyalty, consistency, honesty, competence, autonomy.
+- Lives at 5207 Lake Overlook Ave, Bradenton FL 34208.
+- Friends: Mike Fortenbery (childhood friend, local), Tom Dahl (dirt bike buddy, rides at Croom), Oren and Scott (Orlando).
+- Dirt bike riding is a hobby — rides at Croom forest.
+
+COMMUNICATION STYLE:
+- Keep Telegram messages concise (2-6 lines usually).
+- On phone calls, be conversational and natural — like a trusted friend/advisor.
+- Don't over-explain. Mark is smart and gets things fast.
+- When he's working, be tactical. When he needs support, be present.
+- Never be preachy about health/habits. Gentle nudges, not lectures.
+`;
+
+// ============================================================
+// WEATHER CONTEXT
+// ============================================================
+
+async function getWeatherContext(): Promise<string> {
+  if (!GEMINI_API_KEY) return "";
+
+  try {
+    const result = await searchWeb("current weather in Bradenton FL today");
+    if (!result) return "";
+
+    // Extract just the key info
+    const lines = result.split("\n").filter(l => l.trim()).slice(0, 3);
+    return `\nWEATHER (Bradenton, FL):\n${lines.join("\n")}`;
+  } catch {
+    return "";
+  }
+}
+
+// ============================================================
 // WEB SEARCH (via Gemini with Google Search grounding)
 // ============================================================
 
@@ -1095,7 +1153,8 @@ async function runCheckin(): Promise<void> {
       : "Never";
 
     const prompt = `
-You are Raya, a proactive AI assistant. You are considering whether to send a check-in message to the user via Telegram.
+${RAYA_SYSTEM_PROMPT}
+You are considering whether to send a check-in message to Mark via Telegram.
 
 CURRENT TIME: ${timeStr}
 LAST CHECK-IN: ${lastCheckinStr}
@@ -1107,17 +1166,20 @@ ${emailContext}
 
 RULES:
 1. Max 2-3 check-ins per day. If you've already checked in recently, say NO.
-2. Only check in if there's a genuine REASON — a goal deadline approaching, a todo with an upcoming due date, a habit not yet done today, an important unread email, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint (good morning, end of day).
+2. Only check in if there's a genuine REASON — a goal deadline approaching, a todo with an upcoming due date, a habit not yet done today, an important unread email, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint.
 3. Consider time of day. Late night or very early morning — probably NO.
-4. Be brief, warm, and helpful. Not robotic. Not annoying.
+4. Be brief, warm, and direct. Not robotic. Not annoying. Sound like a trusted friend.
 5. If you have nothing meaningful to say, say NO.
 6. Never mention that you're an AI deciding whether to check in. Just be natural.
-7. If there are upcoming calendar events, you can mention them naturally (e.g. "heads up, you have a meeting in 30 min").
-8. If a habit hasn't been done today, you can gently nudge about it.
+7. If there are upcoming calendar events, mention them naturally.
+8. If a habit hasn't been done today, gently nudge — don't lecture.
+9. Remember Mark has ADD — help him stay focused. If he has todos piling up, help prioritize.
+10. URGENCY: If something is truly time-critical (meeting in <10 min, critical deadline today), set ESCALATE to CALL. Otherwise ESCALATE should be NONE.
 
 RESPOND IN THIS EXACT FORMAT (no extra text):
 DECISION: YES or NO
 REASON: [Why you decided this — one sentence]
+ESCALATE: NONE or CALL
 MESSAGE: [Your message to the user if YES, or "none" if NO]
 `.trim();
 
@@ -1136,12 +1198,21 @@ MESSAGE: [Your message to the user if YES, or "none" if NO]
     console.log(`Check-in decision: ${decision} — ${reason}`);
 
     if (decision === "YES" && message && message.toLowerCase() !== "none") {
+      const escalateMatch = response.match(/ESCALATE:\s*(NONE|CALL)/i);
+      const escalate = escalateMatch?.[1]?.toUpperCase() || "NONE";
+
       const { cleaned, intents } = processIntents(message);
       await Promise.all(intents);
       await storeMessage("assistant", cleaned, { source: "checkin" });
       await sendTelegramText(cleaned);
       await logCheckin("YES", reason, cleaned);
       console.log(`Check-in sent: ${cleaned.substring(0, 80)}...`);
+
+      // Escalate to phone call for urgent items
+      if (escalate === "CALL" && TWILIO_ENABLED && TWILIO_PUBLIC_URL) {
+        console.log("Escalating check-in to phone call...");
+        await makeCall(cleaned);
+      }
     } else {
       await logCheckin("NO", reason);
     }
@@ -1661,13 +1732,25 @@ async function buildPrompt(userMessage: string): Promise<string> {
     minute: "2-digit",
   });
 
-  const [memoryContext, calendarContext, todoContext, habitContext, emailContext] = await Promise.all([
+  // Detect "catch me up" type requests
+  const isCatchUp = /catch me up|what did i miss|fill me in|bring me up to speed|what's new|summary of|recap/i.test(userMessage);
+
+  const contextFetches: Promise<string>[] = [
     getMemoryContext(),
     getCalendarContext(),
     getTodoContext(),
     getHabitContext(),
     getEmailContext(),
-  ]);
+  ];
+
+  // Only fetch weather for catch-up requests or if they ask about weather
+  if (isCatchUp || /weather|rain|umbrella|temperature|forecast/i.test(userMessage)) {
+    contextFetches.push(getWeatherContext());
+  } else {
+    contextFetches.push(Promise.resolve(""));
+  }
+
+  const [memoryContext, calendarContext, todoContext, habitContext, emailContext, weatherContext] = await Promise.all(contextFetches);
 
   const tagInstructions = MEMORY_ENABLED
     ? `
@@ -1706,15 +1789,16 @@ Rules:
     : "";
 
   return `
-You are responding via Telegram. Keep responses concise.
-
+${RAYA_SYSTEM_PROMPT}
 Current time: ${timeStr}
 ${memoryContext}
 ${calendarContext}
 ${todoContext}
 ${habitContext}
 ${emailContext}
+${weatherContext}
 ${tagInstructions}
+${isCatchUp ? "\nThe user wants a full catch-up summary. Cover: calendar, todos, habits (streaks), emails, and anything notable. Be thorough but organized.\n" : ""}
 User: ${userMessage}
 `.trim();
 }
@@ -1938,14 +2022,57 @@ if (WEBHOOK_SECRET) {
 
           console.log(`Voice call started from ${from}`);
 
-          // Greet and start listening
-          const twiml = `<Response>
-            <Say voice="Polly.Matthew">Hey Mark, what's up?</Say>
-            <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST">
-              <Say voice="Polly.Matthew">I'm listening.</Say>
-            </Gather>
-            <Say voice="Polly.Matthew">I didn't hear anything. Goodbye!</Say>
-          </Response>`;
+          // Generate greeting with ElevenLabs voice
+          let greetingTwiml: string;
+          if (ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID && TWILIO_PUBLIC_URL) {
+            try {
+              const audioRes = await fetch(
+                `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+                {
+                  method: "POST",
+                  headers: {
+                    "xi-api-key": ELEVENLABS_API_KEY,
+                    "Content-Type": "application/json",
+                  },
+                  body: JSON.stringify({
+                    text: "Hey Mark, what's up?",
+                    model_id: "eleven_monolingual_v1",
+                    voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+                  }),
+                }
+              );
+
+              if (audioRes.ok) {
+                const audioBuffer = await audioRes.arrayBuffer();
+                const fileName = `greet-${Date.now()}.mp3`;
+                await writeFile(join(TEMP_DIR, fileName), Buffer.from(audioBuffer));
+                const audioUrl = `${TWILIO_PUBLIC_URL}/voice/${fileName}`;
+                greetingTwiml = `<Response>
+                  <Play>${escapeXml(audioUrl)}</Play>
+                  <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+                  <Say voice="Polly.Matthew">I didn't hear anything. Goodbye!</Say>
+                </Response>`;
+                setTimeout(() => unlink(join(TEMP_DIR, fileName)).catch(() => {}), 2 * 60 * 1000);
+              } else {
+                greetingTwiml = `<Response>
+                  <Say voice="Polly.Matthew">Hey Mark, what's up?</Say>
+                  <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+                </Response>`;
+              }
+            } catch {
+              greetingTwiml = `<Response>
+                <Say voice="Polly.Matthew">Hey Mark, what's up?</Say>
+                <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+              </Response>`;
+            }
+          } else {
+            greetingTwiml = `<Response>
+              <Say voice="Polly.Matthew">Hey Mark, what's up?</Say>
+              <Gather input="speech" speechTimeout="auto" action="/twilio/gather" method="POST"/>
+              <Say voice="Polly.Matthew">I didn't hear anything. Goodbye!</Say>
+            </Response>`;
+          }
+          const twiml = greetingTwiml;
 
           return new Response(twiml, { headers: { "Content-Type": "text/xml" } });
         } catch (error) {
@@ -2345,7 +2472,8 @@ async function checkEndOfDayRecap(): Promise<void> {
     ]);
 
     const prompt = `
-You are Raya. Send a brief end-of-day recap to the user via Telegram.
+${RAYA_SYSTEM_PROMPT}
+Send Mark his end-of-day recap via Telegram.
 
 CURRENT TIME: ${timeStr}
 ${memoryContext}
@@ -2354,13 +2482,14 @@ ${habitContext}
 ${emailContext}
 
 Include:
-- A quick summary of what was accomplished today based on conversation history
-- Any todos still pending
-- Habits done/not done today — encourage streaks
-- Flag any important unread emails worth mentioning
-- A warm sign-off for the evening
-- Keep it concise — 3-8 lines max
-- Be natural and encouraging
+- Quick wins — what got done today based on conversation history
+- Any todos still pending — help him decide: tackle tonight or defer to tomorrow?
+- Habits done/not done today — acknowledge effort, note streaks
+- Flag any important unread emails
+- Tomorrow's first calendar event (if any) so he can prep
+- A warm, genuine sign-off. You know Mark — be real, not generic.
+- Keep it concise — 5-10 lines max
+- If it was a productive day, celebrate it. If not, no judgment — just help him reset.
 `.trim();
 
     console.log("Sending end-of-day recap...");
@@ -2417,8 +2546,11 @@ async function checkDailyBriefing(): Promise<void> {
       getEmailContext(),
     ]);
 
+    const weatherContext = await getWeatherContext();
+
     const prompt = `
-You are Raya. Send a brief, warm morning briefing to the user via Telegram.
+${RAYA_SYSTEM_PROMPT}
+Send Mark his morning briefing via Telegram.
 
 CURRENT TIME: ${timeStr}
 ${memoryContext}
@@ -2426,16 +2558,19 @@ ${calendarContext}
 ${todoContext}
 ${habitContext}
 ${emailContext}
+${weatherContext}
 
 Include:
-- A warm, natural greeting appropriate for the day
+- A warm, natural greeting — you know Mark. Be real, not generic.
+- Weather outlook if notable (rain, extreme heat, etc.)
 - Today's calendar events (if any)
-- Active todos or goals worth mentioning
-- Habits and current streaks — encourage keeping streaks alive
-- Flag any important unread emails worth mentioning
-- Keep it concise — 3-8 lines max
+- Top priority todos or goals — help him focus on what matters most today
+- Habits and current streaks — brief encouragement
+- Flag any important unread emails
+- If it's going to be a heavy day, acknowledge it. If it's light, say so.
+- Keep it concise — 5-10 lines max
 - Don't list sections if there's nothing to list
-- Be natural, not robotic
+- Remember he has ADD — help him prioritize, don't overwhelm
 `.trim();
 
     console.log("Sending daily briefing...");
