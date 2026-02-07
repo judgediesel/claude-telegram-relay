@@ -3,40 +3,154 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Raya Dashboard</title>
+  <title>Raya</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            surface: { 900: '#0a0e1a', 800: '#111827', 700: '#1a2035', 600: '#242d42' },
+            accent: { DEFAULT: '#6366f1', light: '#818cf8', dim: '#4f46e5' },
+          }
+        }
+      }
+    }
+  </script>
   <style>
-    body { background: #0f172a; color: #e2e8f0; }
-    .card { background: #1e293b; border-radius: 12px; padding: 1.5rem; }
-    .tab-active { background: #3b82f6; color: white; }
-    .tab { cursor: pointer; padding: 0.5rem 1rem; border-radius: 8px; transition: all 0.2s; }
-    .tab:hover { background: #334155; }
-    .streak { color: #f59e0b; font-weight: bold; }
-    .done { color: #22c55e; }
-    .pending { color: #f97316; }
-    .badge { display: inline-block; padding: 2px 8px; border-radius: 9999px; font-size: 0.75rem; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    * { font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif; }
+    body { background: #0a0e1a; color: #e2e8f0; }
+
+    .glass {
+      background: rgba(17, 24, 39, 0.7);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(99, 102, 241, 0.1);
+      border-radius: 16px;
+    }
+
+    .glass-strong {
+      background: rgba(26, 32, 53, 0.8);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(99, 102, 241, 0.15);
+      border-radius: 16px;
+    }
+
+    .stat-card {
+      background: linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(99, 102, 241, 0.02));
+      border: 1px solid rgba(99, 102, 241, 0.15);
+      border-radius: 16px;
+      transition: all 0.3s ease;
+    }
+    .stat-card:hover {
+      border-color: rgba(99, 102, 241, 0.3);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 30px rgba(99, 102, 241, 0.1);
+    }
+
+    .tab {
+      cursor: pointer;
+      padding: 0.6rem 1.2rem;
+      border-radius: 10px;
+      transition: all 0.2s ease;
+      font-weight: 500;
+      font-size: 0.875rem;
+      color: #94a3b8;
+    }
+    .tab:hover { background: rgba(99, 102, 241, 0.1); color: #c7d2fe; }
+    .tab-active {
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      color: white;
+      box-shadow: 0 4px 15px rgba(99, 102, 241, 0.3);
+    }
+
+    .msg-bubble {
+      border-radius: 12px;
+      padding: 0.75rem 1rem;
+      max-width: 85%;
+      line-height: 1.5;
+    }
+    .msg-user {
+      background: linear-gradient(135deg, #6366f1, #4f46e5);
+      color: white;
+      margin-left: auto;
+      border-bottom-right-radius: 4px;
+    }
+    .msg-assistant {
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid rgba(99, 102, 241, 0.1);
+      border-bottom-left-radius: 4px;
+    }
+
+    .streak-fire { color: #f59e0b; }
+    .status-done { color: #22c55e; }
+    .status-pending { color: #f97316; }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 10px;
+      border-radius: 9999px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      letter-spacing: 0.025em;
+      text-transform: uppercase;
+    }
+
+    .glow-line {
+      height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(99, 102, 241, 0.3), transparent);
+    }
+
+    .progress-ring {
+      width: 80px;
+      height: 80px;
+    }
+    .progress-ring circle {
+      fill: none;
+      stroke-width: 6;
+      stroke-linecap: round;
+    }
+
+    .fade-in { animation: fadeIn 0.3s ease-out; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #475569; }
   </style>
 </head>
-<body class="min-h-screen p-4 md:p-8">
-  <div class="max-w-5xl mx-auto">
-    <div class="flex items-center justify-between mb-8">
-      <h1 class="text-3xl font-bold text-white">Raya Dashboard</h1>
-      <div id="stats-bar" class="text-sm text-slate-400"></div>
+<body class="min-h-screen">
+  <!-- Header -->
+  <header class="sticky top-0 z-50 glass px-6 py-4 mx-4 mt-4 flex items-center justify-between" style="border-radius: 16px;">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-xl bg-gradient-to-br from-accent to-purple-600 flex items-center justify-center font-bold text-white text-lg shadow-lg shadow-accent/20">R</div>
+      <div>
+        <h1 class="text-xl font-bold text-white tracking-tight">Raya</h1>
+        <div id="status-line" class="text-xs text-slate-500">Loading...</div>
+      </div>
     </div>
+    <div class="flex items-center gap-2">
+      <div id="live-dot" class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+      <span class="text-xs text-slate-500" id="uptime-display">--</span>
+    </div>
+  </header>
 
+  <main class="max-w-6xl mx-auto px-4 py-6">
     <!-- Tabs -->
-    <div class="flex gap-2 mb-6 flex-wrap" id="tabs">
+    <nav class="flex gap-2 mb-6 flex-wrap" id="tabs">
       <div class="tab tab-active" data-tab="overview">Overview</div>
       <div class="tab" data-tab="messages">Messages</div>
       <div class="tab" data-tab="memory">Memory</div>
       <div class="tab" data-tab="todos">Todos</div>
       <div class="tab" data-tab="habits">Habits</div>
       <div class="tab" data-tab="logs">Logs</div>
-    </div>
+    </nav>
 
     <!-- Content -->
-    <div id="content"></div>
-  </div>
+    <div id="content" class="fade-in"></div>
+  </main>
 
   <script>
     const TOKEN = "__TOKEN__";
@@ -48,13 +162,22 @@
     }
 
     function timeAgo(dateStr) {
+      if (!dateStr) return "";
       const diff = Date.now() - new Date(dateStr).getTime();
       const mins = Math.floor(diff / 60000);
       if (mins < 1) return "just now";
       if (mins < 60) return `${mins}m ago`;
       const hrs = Math.floor(mins / 60);
       if (hrs < 24) return `${hrs}h ago`;
-      return `${Math.floor(hrs / 24)}d ago`;
+      const days = Math.floor(hrs / 24);
+      if (days < 7) return `${days}d ago`;
+      return `${Math.floor(days / 7)}w ago`;
+    }
+
+    function formatTime(dateStr) {
+      return new Date(dateStr).toLocaleString("en-US", {
+        month: "short", day: "numeric", hour: "numeric", minute: "2-digit"
+      });
     }
 
     function esc(str) {
@@ -63,70 +186,115 @@
       return d.innerHTML;
     }
 
+    function progressCircle(done, total, color = "#6366f1") {
+      const pct = total > 0 ? done / total : 0;
+      const r = 34;
+      const c = 2 * Math.PI * r;
+      const offset = c * (1 - pct);
+      return `
+        <svg class="progress-ring" viewBox="0 0 80 80">
+          <circle cx="40" cy="40" r="${r}" stroke="rgba(99,102,241,0.1)" />
+          <circle cx="40" cy="40" r="${r}" stroke="${color}" stroke-dasharray="${c}" stroke-dashoffset="${offset}"
+            transform="rotate(-90 40 40)" style="transition: stroke-dashoffset 1s ease;" />
+          <text x="40" y="36" text-anchor="middle" fill="white" font-size="18" font-weight="700">${done}</text>
+          <text x="40" y="50" text-anchor="middle" fill="#64748b" font-size="10">of ${total}</text>
+        </svg>
+      `;
+    }
+
     async function showOverview() {
       const [stats, todos, habits, msgs] = await Promise.all([
-        api("/api/stats"),
-        api("/api/todos"),
-        api("/api/habits"),
-        api("/api/messages"),
+        api("/api/stats"), api("/api/todos"), api("/api/habits"), api("/api/messages"),
       ]);
 
       const upH = Math.floor((stats.uptime || 0) / 3600);
       const upM = Math.floor(((stats.uptime || 0) % 3600) / 60);
-
-      document.getElementById("stats-bar").textContent =
-        `Uptime: ${upH}h ${upM}m`;
+      document.getElementById("uptime-display").textContent = `${upH}h ${upM}m`;
+      document.getElementById("status-line").textContent = `Personal AI Assistant`;
 
       const todayStr = new Date().toLocaleDateString("en-US");
       const habitsData = habits.habits || [];
       const habitsDone = habitsData.filter(h =>
         h.updated_at && new Date(h.updated_at).toLocaleDateString("en-US") === todayStr
       ).length;
-
       const activeTodos = (todos.active || []).length;
-      const recentMsgs = (msgs.messages || []).slice(0, 5);
+      const recentMsgs = (msgs.messages || []).slice(0, 6);
 
       document.getElementById("content").innerHTML = `
-        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-          <div class="card text-center">
-            <div class="text-3xl font-bold text-blue-400">${stats.facts || 0}</div>
-            <div class="text-sm text-slate-400">Facts</div>
+        <div class="fade-in">
+          <!-- Stats Grid -->
+          <div class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+            <div class="stat-card p-5 text-center">
+              <div class="text-3xl font-bold text-indigo-400 mb-1">${stats.messages || 0}</div>
+              <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Messages</div>
+            </div>
+            <div class="stat-card p-5 text-center">
+              <div class="text-3xl font-bold text-cyan-400 mb-1">${stats.facts || 0}</div>
+              <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Memories</div>
+            </div>
+            <div class="stat-card p-5 text-center">
+              <div class="text-3xl font-bold text-violet-400 mb-1">${stats.goals || 0}</div>
+              <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Goals</div>
+            </div>
+            <div class="stat-card p-5 text-center">
+              <div class="text-3xl font-bold text-amber-400 mb-1">${activeTodos}</div>
+              <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Todos</div>
+            </div>
+            <div class="stat-card p-5 text-center col-span-2 md:col-span-1">
+              <div class="text-3xl font-bold text-emerald-400 mb-1">${habitsDone}<span class="text-lg text-slate-600">/${habitsData.length}</span></div>
+              <div class="text-xs text-slate-500 font-medium uppercase tracking-wider">Habits Today</div>
+            </div>
           </div>
-          <div class="card text-center">
-            <div class="text-3xl font-bold text-purple-400">${stats.goals || 0}</div>
-            <div class="text-sm text-slate-400">Goals</div>
-          </div>
-          <div class="card text-center">
-            <div class="text-3xl font-bold text-orange-400">${activeTodos}</div>
-            <div class="text-sm text-slate-400">Active Todos</div>
-          </div>
-          <div class="card text-center">
-            <div class="text-3xl font-bold text-green-400">${habitsDone}/${habitsData.length}</div>
-            <div class="text-sm text-slate-400">Habits Today</div>
-          </div>
-        </div>
 
-        <div class="grid md:grid-cols-2 gap-4">
-          <div class="card">
-            <h3 class="text-lg font-semibold mb-3 text-white">Recent Messages</h3>
-            ${recentMsgs.map(m => `
-              <div class="mb-2 text-sm">
-                <span class="badge ${m.role === "user" ? "bg-blue-900 text-blue-300" : "bg-green-900 text-green-300"}">${m.role}</span>
-                <span class="text-slate-500 ml-1">${timeAgo(m.created_at)}</span>
-                <div class="mt-1 text-slate-300">${esc(m.content?.substring(0, 120))}${m.content?.length > 120 ? "..." : ""}</div>
+          <div class="grid md:grid-cols-3 gap-4">
+            <!-- Recent Conversations -->
+            <div class="glass-strong p-5 md:col-span-2">
+              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Recent Conversations</h3>
+              <div class="space-y-3">
+                ${recentMsgs.map(m => `
+                  <div class="flex gap-3 items-start">
+                    <div class="w-7 h-7 rounded-lg flex-shrink-0 flex items-center justify-center text-xs font-bold mt-0.5
+                      ${m.role === "user" ? "bg-indigo-500/20 text-indigo-300" : "bg-emerald-500/20 text-emerald-300"}">
+                      ${m.role === "user" ? "M" : "R"}
+                    </div>
+                    <div class="min-w-0">
+                      <div class="flex items-center gap-2 mb-0.5">
+                        <span class="text-xs font-medium ${m.role === "user" ? "text-indigo-400" : "text-emerald-400"}">${m.role === "user" ? "Mark" : "Raya"}</span>
+                        <span class="text-xs text-slate-600">${timeAgo(m.created_at)}</span>
+                        ${m.metadata?.source ? `<span class="badge bg-slate-800 text-slate-500">${m.metadata.source}</span>` : ""}
+                      </div>
+                      <div class="text-sm text-slate-400 leading-relaxed">${esc(m.content?.substring(0, 150))}${m.content?.length > 150 ? "..." : ""}</div>
+                    </div>
+                  </div>
+                `).join("") || '<div class="text-slate-600 text-sm">No messages yet</div>'}
               </div>
-            `).join("") || '<div class="text-slate-500">No messages yet</div>'}
-          </div>
+            </div>
 
-          <div class="card">
-            <h3 class="text-lg font-semibold mb-3 text-white">Habits</h3>
-            ${habitsData.map(h => {
-              const done = h.updated_at && new Date(h.updated_at).toLocaleDateString("en-US") === todayStr;
-              return `<div class="mb-2 text-sm flex justify-between">
-                <span>${done ? '<span class="done">&#10003;</span>' : '<span class="pending">&#9675;</span>'} ${esc(h.content)}</span>
-                <span class="streak">${h.priority ? h.priority + " day streak" : ""}</span>
-              </div>`;
-            }).join("") || '<div class="text-slate-500">No habits tracked</div>'}
+            <!-- Habits Sidebar -->
+            <div class="glass-strong p-5">
+              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Today's Habits</h3>
+              <div class="flex justify-center mb-4">
+                ${progressCircle(habitsDone, habitsData.length, "#22c55e")}
+              </div>
+              <div class="space-y-2.5">
+                ${habitsData.map(h => {
+                  const done = h.updated_at && new Date(h.updated_at).toLocaleDateString("en-US") === todayStr;
+                  const streak = h.priority || 0;
+                  return `
+                    <div class="flex items-center justify-between">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <div class="w-5 h-5 rounded-md flex items-center justify-center text-xs
+                          ${done ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-700/50 text-slate-600"}">
+                          ${done ? "&#10003;" : ""}
+                        </div>
+                        <span class="text-sm ${done ? "text-slate-300" : "text-slate-500"} truncate">${esc(h.content)}</span>
+                      </div>
+                      ${streak > 0 ? `<span class="text-xs streak-fire flex-shrink-0">${streak}d</span>` : ""}
+                    </div>
+                  `;
+                }).join("") || '<div class="text-slate-600 text-sm text-center">No habits yet</div>'}
+              </div>
+            </div>
           </div>
         </div>
       `;
@@ -136,17 +304,23 @@
       const data = await api("/api/messages");
       const msgs = data.messages || [];
       document.getElementById("content").innerHTML = `
-        <div class="card">
-          <h3 class="text-lg font-semibold mb-4 text-white">Conversation History</h3>
-          ${msgs.map(m => `
-            <div class="mb-3 pb-3 border-b border-slate-700">
-              <div>
-                <span class="badge ${m.role === "user" ? "bg-blue-900 text-blue-300" : "bg-green-900 text-green-300"}">${m.role}</span>
-                <span class="text-slate-500 text-sm ml-2">${new Date(m.created_at).toLocaleString()}</span>
+        <div class="glass-strong p-5 fade-in">
+          <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-5">Conversation History</h3>
+          <div class="space-y-3 max-w-3xl mx-auto">
+            ${[...msgs].reverse().map(m => `
+              <div class="flex ${m.role === "user" ? "justify-end" : "justify-start"}">
+                <div>
+                  <div class="msg-bubble ${m.role === "user" ? "msg-user" : "msg-assistant"}">
+                    <div class="text-sm whitespace-pre-wrap">${esc(m.content?.substring(0, 500))}${m.content?.length > 500 ? "..." : ""}</div>
+                  </div>
+                  <div class="text-xs text-slate-600 mt-1 ${m.role === "user" ? "text-right" : ""} px-1">
+                    ${formatTime(m.created_at)}
+                    ${m.metadata?.source ? ` · ${m.metadata.source}` : ""}
+                  </div>
+                </div>
               </div>
-              <div class="mt-1 text-slate-300 text-sm whitespace-pre-wrap">${esc(m.content?.substring(0, 500))}${m.content?.length > 500 ? "..." : ""}</div>
-            </div>
-          `).join("") || '<div class="text-slate-500">No messages</div>'}
+            `).join("") || '<div class="text-slate-600 text-center py-8">No messages yet</div>'}
+          </div>
         </div>
       `;
     }
@@ -154,25 +328,49 @@
     async function showMemory() {
       const data = await api("/api/memory");
       document.getElementById("content").innerHTML = `
-        <div class="grid md:grid-cols-2 gap-4">
-          <div class="card">
-            <h3 class="text-lg font-semibold mb-3 text-white">Facts (${(data.facts || []).length})</h3>
-            ${(data.facts || []).map(f => `
-              <div class="mb-2 text-sm text-slate-300">- ${esc(f.content)}</div>
-            `).join("") || '<div class="text-slate-500">No facts stored</div>'}
-          </div>
-          <div>
-            <div class="card mb-4">
-              <h3 class="text-lg font-semibold mb-3 text-white">Active Goals (${(data.goals || []).length})</h3>
-              ${(data.goals || []).map(g => `
-                <div class="mb-2 text-sm text-slate-300">- ${esc(g.content)}${g.deadline ? ` <span class="text-yellow-400">(by ${g.deadline})</span>` : ""}</div>
-              `).join("") || '<div class="text-slate-500">No active goals</div>'}
+        <div class="grid md:grid-cols-2 gap-4 fade-in">
+          <div class="glass-strong p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Memories</h3>
+              <span class="badge bg-cyan-500/10 text-cyan-400">${(data.facts || []).length}</span>
             </div>
-            <div class="card">
-              <h3 class="text-lg font-semibold mb-3 text-white">Completed Goals</h3>
-              ${(data.completedGoals || []).map(g => `
-                <div class="mb-2 text-sm text-slate-500 line-through">${esc(g.content)}</div>
-              `).join("") || '<div class="text-slate-500">None yet</div>'}
+            <div class="space-y-2 max-h-[60vh] overflow-y-auto pr-2">
+              ${(data.facts || []).map(f => `
+                <div class="flex gap-2 items-start group">
+                  <div class="w-1.5 h-1.5 rounded-full bg-cyan-500/50 mt-2 flex-shrink-0"></div>
+                  <span class="text-sm text-slate-400 leading-relaxed">${esc(f.content)}</span>
+                </div>
+              `).join("") || '<div class="text-slate-600 text-sm">No memories stored yet</div>'}
+            </div>
+          </div>
+          <div class="space-y-4">
+            <div class="glass-strong p-5">
+              <div class="flex items-center justify-between mb-4">
+                <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Active Goals</h3>
+                <span class="badge bg-violet-500/10 text-violet-400">${(data.goals || []).length}</span>
+              </div>
+              <div class="space-y-2">
+                ${(data.goals || []).map(g => `
+                  <div class="flex gap-2 items-start">
+                    <div class="w-1.5 h-1.5 rounded-full bg-violet-500/50 mt-2 flex-shrink-0"></div>
+                    <div>
+                      <span class="text-sm text-slate-300">${esc(g.content)}</span>
+                      ${g.deadline ? `<span class="text-xs text-amber-400/80 ml-1">by ${g.deadline}</span>` : ""}
+                    </div>
+                  </div>
+                `).join("") || '<div class="text-slate-600 text-sm">No active goals</div>'}
+              </div>
+            </div>
+            <div class="glass-strong p-5">
+              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">Completed Goals</h3>
+              <div class="space-y-2">
+                ${(data.completedGoals || []).map(g => `
+                  <div class="flex gap-2 items-start">
+                    <span class="text-emerald-500 text-xs mt-0.5">&#10003;</span>
+                    <span class="text-sm text-slate-600 line-through">${esc(g.content)}</span>
+                  </div>
+                `).join("") || '<div class="text-slate-600 text-sm">None yet</div>'}
+              </div>
             </div>
           </div>
         </div>
@@ -181,25 +379,44 @@
 
     async function showTodos() {
       const data = await api("/api/todos");
+      const active = data.active || [];
+      const completed = data.completed || [];
+
       document.getElementById("content").innerHTML = `
-        <div class="grid md:grid-cols-2 gap-4">
-          <div class="card">
-            <h3 class="text-lg font-semibold mb-3 text-white">Active (${(data.active || []).length})</h3>
-            ${(data.active || []).map(t => `
-              <div class="mb-2 text-sm text-slate-300">
-                <span class="pending">&#9675;</span> ${esc(t.content)}
-                ${t.deadline ? `<span class="text-yellow-400 text-xs ml-1">(due ${t.deadline})</span>` : ""}
-              </div>
-            `).join("") || '<div class="text-slate-500">All clear!</div>'}
+        <div class="grid md:grid-cols-2 gap-4 fade-in">
+          <div class="glass-strong p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Active</h3>
+              <span class="badge bg-amber-500/10 text-amber-400">${active.length}</span>
+            </div>
+            <div class="space-y-2.5">
+              ${active.map(t => `
+                <div class="flex items-start gap-3 p-2.5 rounded-lg bg-slate-800/30">
+                  <div class="w-5 h-5 rounded-md border-2 border-amber-500/30 flex-shrink-0 mt-0.5"></div>
+                  <div class="min-w-0">
+                    <div class="text-sm text-slate-300">${esc(t.content)}</div>
+                    ${t.deadline ? `<div class="text-xs text-amber-400/60 mt-0.5">Due: ${t.deadline}</div>` : ""}
+                  </div>
+                </div>
+              `).join("") || '<div class="text-slate-600 text-sm text-center py-4">All clear! Nothing to do.</div>'}
+            </div>
           </div>
-          <div class="card">
-            <h3 class="text-lg font-semibold mb-3 text-white">Completed</h3>
-            ${(data.completed || []).map(t => `
-              <div class="mb-2 text-sm text-slate-500">
-                <span class="done">&#10003;</span> <span class="line-through">${esc(t.content)}</span>
-                <span class="text-xs ml-1">${timeAgo(t.completed_at)}</span>
-              </div>
-            `).join("") || '<div class="text-slate-500">None yet</div>'}
+          <div class="glass-strong p-5">
+            <div class="flex items-center justify-between mb-4">
+              <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider">Completed</h3>
+              <span class="badge bg-emerald-500/10 text-emerald-400">${completed.length}</span>
+            </div>
+            <div class="space-y-2.5">
+              ${completed.map(t => `
+                <div class="flex items-start gap-3 p-2.5 rounded-lg">
+                  <div class="w-5 h-5 rounded-md bg-emerald-500/20 flex items-center justify-center text-emerald-400 text-xs flex-shrink-0 mt-0.5">&#10003;</div>
+                  <div class="min-w-0">
+                    <div class="text-sm text-slate-600 line-through">${esc(t.content)}</div>
+                    <div class="text-xs text-slate-700 mt-0.5">${timeAgo(t.completed_at)}</div>
+                  </div>
+                </div>
+              `).join("") || '<div class="text-slate-600 text-sm text-center py-4">None completed yet</div>'}
+            </div>
           </div>
         </div>
       `;
@@ -209,27 +426,44 @@
       const data = await api("/api/habits");
       const habits = data.habits || [];
       const todayStr = new Date().toLocaleDateString("en-US");
+      const done = habits.filter(h => h.updated_at && new Date(h.updated_at).toLocaleDateString("en-US") === todayStr).length;
 
       document.getElementById("content").innerHTML = `
-        <div class="card">
-          <h3 class="text-lg font-semibold mb-4 text-white">Habits</h3>
-          ${habits.map(h => {
-            const done = h.updated_at && new Date(h.updated_at).toLocaleDateString("en-US") === todayStr;
-            const streak = h.priority || 0;
-            return `
-              <div class="mb-3 pb-3 border-b border-slate-700 flex justify-between items-center">
-                <div>
-                  <span class="${done ? "done" : "pending"}">${done ? "&#10003;" : "&#9675;"}</span>
-                  <span class="text-slate-300 ml-1">${esc(h.content)}</span>
-                  <span class="badge bg-slate-700 text-slate-400 ml-2">${h.deadline || "daily"}</span>
+        <div class="fade-in">
+          <div class="glass-strong p-6 mb-4 flex items-center justify-between">
+            <div>
+              <h3 class="text-lg font-semibold text-white">Daily Habits</h3>
+              <p class="text-sm text-slate-500 mt-1">${done} of ${habits.length} completed today</p>
+            </div>
+            ${progressCircle(done, habits.length, "#22c55e")}
+          </div>
+
+          <div class="space-y-3">
+            ${habits.map(h => {
+              const isDone = h.updated_at && new Date(h.updated_at).toLocaleDateString("en-US") === todayStr;
+              const streak = h.priority || 0;
+              return `
+                <div class="glass-strong p-4 flex items-center justify-between">
+                  <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 rounded-xl flex items-center justify-center text-sm
+                      ${isDone ? "bg-emerald-500/20 text-emerald-400" : "bg-slate-700/50 text-slate-600"}">
+                      ${isDone ? "&#10003;" : "&#9675;"}
+                    </div>
+                    <div>
+                      <div class="text-sm font-medium ${isDone ? "text-slate-200" : "text-slate-400"}">${esc(h.content)}</div>
+                      <div class="text-xs text-slate-600">${h.deadline || "daily"} ${h.updated_at ? `· Last: ${timeAgo(h.updated_at)}` : ""}</div>
+                    </div>
+                  </div>
+                  <div class="text-right">
+                    ${streak > 0 ? `
+                      <div class="streak-fire text-lg font-bold">${streak}</div>
+                      <div class="text-xs text-slate-600">day streak</div>
+                    ` : '<div class="text-xs text-slate-700">No streak</div>'}
+                  </div>
                 </div>
-                <div class="text-right">
-                  ${streak > 0 ? `<div class="streak">${streak} day${streak > 1 ? "s" : ""}</div>` : ""}
-                  ${h.updated_at ? `<div class="text-xs text-slate-500">Last: ${timeAgo(h.updated_at)}</div>` : ""}
-                </div>
-              </div>
-            `;
-          }).join("") || '<div class="text-slate-500">No habits tracked yet. Tell Raya to add one!</div>'}
+              `;
+            }).join("") || '<div class="glass-strong p-8 text-slate-600 text-center">No habits tracked yet. Tell Raya to add one!</div>'}
+          </div>
         </div>
       `;
     }
@@ -239,54 +473,49 @@
       const logs = data.logs || [];
 
       document.getElementById("content").innerHTML = `
-        <div class="card">
-          <h3 class="text-lg font-semibold mb-4 text-white">Recent Logs</h3>
-          <div class="overflow-x-auto">
-            <table class="w-full text-sm">
-              <thead>
-                <tr class="text-slate-400 border-b border-slate-700">
-                  <th class="text-left py-2">Time</th>
-                  <th class="text-left py-2">Event</th>
-                  <th class="text-left py-2">Message</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${logs.map(l => `
-                  <tr class="border-b border-slate-800">
-                    <td class="py-2 text-slate-500 whitespace-nowrap">${new Date(l.created_at).toLocaleString()}</td>
-                    <td class="py-2"><span class="badge bg-slate-700">${esc(l.event)}</span></td>
-                    <td class="py-2 text-slate-300">${esc(l.message?.substring(0, 200))}</td>
-                  </tr>
-                `).join("") || '<tr><td colspan="3" class="text-slate-500 py-4">No logs yet</td></tr>'}
-              </tbody>
-            </table>
+        <div class="glass-strong p-5 fade-in">
+          <h3 class="text-sm font-semibold text-slate-400 uppercase tracking-wider mb-4">System Logs</h3>
+          <div class="space-y-1">
+            ${logs.map(l => {
+              const isYes = l.event?.includes("YES");
+              const isNo = l.event?.includes("NO");
+              return `
+                <div class="flex items-start gap-3 py-2.5 border-b border-slate-800/50 text-sm">
+                  <div class="text-xs text-slate-600 whitespace-nowrap w-32 flex-shrink-0 pt-0.5">${formatTime(l.created_at)}</div>
+                  <div class="flex-shrink-0">
+                    <span class="badge ${isYes ? "bg-emerald-500/10 text-emerald-400" : isNo ? "bg-slate-700 text-slate-500" : "bg-indigo-500/10 text-indigo-400"}">${esc(l.event)}</span>
+                  </div>
+                  <div class="text-slate-500 truncate">${esc(l.message?.substring(0, 200))}</div>
+                </div>
+              `;
+            }).join("") || '<div class="text-slate-600 text-center py-8">No logs yet</div>'}
           </div>
         </div>
       `;
     }
 
     // Tab navigation
-    const tabHandlers = {
-      overview: showOverview,
-      messages: showMessages,
-      memory: showMemory,
-      todos: showTodos,
-      habits: showHabits,
-      logs: showLogs,
-    };
+    const tabHandlers = { overview: showOverview, messages: showMessages, memory: showMemory, todos: showTodos, habits: showHabits, logs: showLogs };
 
     document.getElementById("tabs").addEventListener("click", (e) => {
       const tab = e.target.closest(".tab");
       if (!tab) return;
       const name = tab.dataset.tab;
-
       document.querySelectorAll(".tab").forEach(t => t.classList.remove("tab-active"));
       tab.classList.add("tab-active");
-
+      document.getElementById("content").innerHTML = '<div class="flex justify-center py-12"><div class="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div></div>';
       tabHandlers[name]?.();
     });
 
-    // Load overview on start
+    // Auto-refresh every 30 seconds
+    let currentTab = "overview";
+    document.getElementById("tabs").addEventListener("click", (e) => {
+      const tab = e.target.closest(".tab");
+      if (tab) currentTab = tab.dataset.tab;
+    });
+    setInterval(() => tabHandlers[currentTab]?.(), 30000);
+
+    // Load overview
     showOverview();
   </script>
 </body>
