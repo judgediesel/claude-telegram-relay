@@ -7,7 +7,7 @@
  * Run: bun run src/relay.ts
  */
 
-import { Bot, Context } from "grammy";
+import { Bot, Context, InputFile } from "grammy";
 import { spawn } from "bun";
 import { writeFile, mkdir, readFile, unlink } from "fs/promises";
 import { join } from "path";
@@ -20,6 +20,12 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const ALLOWED_USER_ID = process.env.TELEGRAM_USER_ID || "";
 const CLAUDE_PATH = process.env.CLAUDE_PATH || "claude";
 const RELAY_DIR = process.env.RELAY_DIR || join(process.env.HOME || "~", ".claude-relay");
+
+// Voice support
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "";
+const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "";
+const VOICE_REPLIES_ENABLED = !!(ELEVENLABS_API_KEY && ELEVENLABS_VOICE_ID);
 
 // Directories
 const TEMP_DIR = join(RELAY_DIR, "temp");
@@ -214,26 +220,78 @@ bot.on("message:text", async (ctx) => {
   await sendResponse(ctx, response);
 });
 
-// Voice messages (optional - requires transcription)
+// Voice messages
 bot.on("message:voice", async (ctx) => {
   console.log("Voice message received");
   await ctx.replyWithChatAction("typing");
 
-  // To handle voice, you need a transcription service
-  // Options: Whisper API, Gemini, AssemblyAI, etc.
-  //
-  // Example flow:
-  // 1. Download the voice file
-  // 2. Send to transcription service
-  // 3. Pass transcription to Claude
-  //
-  // const transcription = await transcribe(voiceFile);
-  // const response = await callClaude(`[Voice]: ${transcription}`);
+  if (!GEMINI_API_KEY) {
+    await ctx.reply("Voice messages require GEMINI_API_KEY to be set in .env");
+    return;
+  }
 
-  await ctx.reply(
-    "Voice messages require a transcription service. " +
-      "Add Whisper, Gemini, or similar to handle voice."
-  );
+  try {
+    // Download voice file from Telegram
+    const file = await ctx.api.getFile(ctx.message.voice.file_id);
+    const response = await fetch(
+      `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`
+    );
+    const audioBuffer = Buffer.from(await response.arrayBuffer());
+
+    // Transcribe with Gemini
+    const transcription = await transcribeAudio(audioBuffer);
+    console.log(`Transcription: ${transcription.substring(0, 80)}...`);
+
+    // Send to Claude
+    const enrichedPrompt = buildPrompt(`[Voice message]: ${transcription}`);
+    const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
+
+    // Try voice reply if enabled
+    const voicePath = await textToVoice(claudeResponse);
+    if (voicePath) {
+      await ctx.replyWithVoice(new InputFile(voicePath));
+      await unlink(voicePath).catch(() => {});
+    }
+
+    // Always send text too (voice can be hard to hear, and shows the transcription)
+    await sendResponse(ctx, `> ${transcription}\n\n${claudeResponse}`);
+  } catch (error) {
+    console.error("Voice error:", error);
+    await ctx.reply("Could not process voice message.");
+  }
+});
+
+// Audio file attachments
+bot.on("message:audio", async (ctx) => {
+  console.log(`Audio file received: ${ctx.message.audio.file_name || "unknown"}`);
+  await ctx.replyWithChatAction("typing");
+
+  if (!GEMINI_API_KEY) {
+    await ctx.reply("Audio transcription requires GEMINI_API_KEY to be set in .env");
+    return;
+  }
+
+  try {
+    const file = await ctx.api.getFile(ctx.message.audio.file_id);
+    const response = await fetch(
+      `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`
+    );
+    const audioBuffer = Buffer.from(await response.arrayBuffer());
+
+    const transcription = await transcribeAudio(audioBuffer);
+    console.log(`Transcription: ${transcription.substring(0, 80)}...`);
+
+    const caption = ctx.message.caption || "[Audio file]";
+    const enrichedPrompt = buildPrompt(
+      `${caption}: ${transcription}`
+    );
+    const claudeResponse = await callClaude(enrichedPrompt, { resume: true });
+
+    await sendResponse(ctx, `> ${transcription}\n\n${claudeResponse}`);
+  } catch (error) {
+    console.error("Audio error:", error);
+    await ctx.reply("Could not process audio file.");
+  }
 });
 
 // Photos/Images
@@ -306,6 +364,120 @@ bot.on("message:document", async (ctx) => {
 });
 
 // ============================================================
+// VOICE HELPERS
+// ============================================================
+
+async function transcribeAudio(audioBuffer: Buffer): Promise<string> {
+  if (!GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY not configured");
+  }
+
+  const base64Audio = audioBuffer.toString("base64");
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                inline_data: {
+                  mime_type: "audio/ogg",
+                  data: base64Audio,
+                },
+              },
+              {
+                text: "Transcribe this audio exactly as spoken. Return only the transcription text, nothing else.",
+              },
+            ],
+          },
+        ],
+      }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error("Gemini API error:", response.status, errorText);
+    throw new Error(`Gemini transcription failed: ${response.status}`);
+  }
+
+  const data = (await response.json()) as {
+    candidates?: Array<{
+      content?: { parts?: Array<{ text?: string }> };
+    }>;
+  };
+
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+  if (!text) {
+    throw new Error("Gemini returned empty transcription");
+  }
+
+  return text;
+}
+
+async function textToVoice(text: string): Promise<string | null> {
+  if (!VOICE_REPLIES_ENABLED) return null;
+
+  try {
+    // Truncate for reasonable TTS length
+    const ttsText = text.length > 2000 ? text.substring(0, 2000) + "..." : text;
+
+    const response = await fetch(
+      `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "xi-api-key": ELEVENLABS_API_KEY,
+        },
+        body: JSON.stringify({
+          text: ttsText,
+          model_id: "eleven_turbo_v2_5",
+        }),
+      }
+    );
+
+    if (!response.ok) {
+      console.error("ElevenLabs API error:", response.status);
+      return null;
+    }
+
+    const timestamp = Date.now();
+    const mp3Path = join(TEMP_DIR, `voice_${timestamp}.mp3`);
+    const oggPath = join(TEMP_DIR, `voice_${timestamp}.ogg`);
+
+    const audioBuffer = Buffer.from(await response.arrayBuffer());
+    await writeFile(mp3Path, audioBuffer);
+
+    // Convert MP3 to OGG Opus (required by Telegram for voice messages)
+    const ffmpeg = spawn(
+      ["ffmpeg", "-i", mp3Path, "-c:a", "libopus", "-b:a", "64k", "-y", oggPath],
+      { stdout: "pipe", stderr: "pipe" }
+    );
+    await ffmpeg.exited;
+
+    // Cleanup MP3
+    await unlink(mp3Path).catch(() => {});
+
+    // Verify OGG was created
+    try {
+      await readFile(oggPath);
+      return oggPath;
+    } catch {
+      console.error("ffmpeg conversion failed — is ffmpeg installed?");
+      return null;
+    }
+  } catch (error) {
+    console.error("TTS error:", error);
+    return null;
+  }
+}
+
+// ============================================================
 // HELPERS
 // ============================================================
 
@@ -373,6 +545,8 @@ async function sendResponse(ctx: Context, response: string): Promise<void> {
 
 console.log("Starting Claude Telegram Relay...");
 console.log(`Authorized user: ${ALLOWED_USER_ID || "ANY (not recommended)"}`);
+console.log(`Voice transcription: ${GEMINI_API_KEY ? "enabled" : "disabled (set GEMINI_API_KEY)"}`);
+console.log(`Voice replies: ${VOICE_REPLIES_ENABLED ? "enabled" : "disabled (set ELEVENLABS_API_KEY + ELEVENLABS_VOICE_ID)"}`);
 
 bot.start({
   onStart: () => {
