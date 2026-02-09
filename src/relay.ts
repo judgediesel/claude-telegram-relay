@@ -160,10 +160,17 @@ bot.use(async (ctx, next) => {
 // MESSAGE HANDLERS
 // ============================================================
 
+// Detect if user is requesting a voice reply
+function wantsVoiceReply(text: string): boolean {
+  return /\b(voice\s*(message|reply|response|memo|note)|send.*voice|reply.*voice|talk\s*to\s*me|say\s*(it|that|this|something)\s*(out\s*loud|in\s*voice|as\s*voice|sexy|back)|speak\s*to\s*me|read\s*(it|that|this)\s*(out\s*loud|to\s*me|aloud)|use\s*your\s*voice)\b/i.test(text);
+}
+
 // Text messages
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
   console.log(`Message: ${text.substring(0, 50)}...`);
+
+  const voiceRequested = wantsVoiceReply(text);
 
   await ctx.replyWithChatAction("typing");
   storeMessage("user", text);
@@ -174,6 +181,15 @@ bot.on("message:text", async (ctx) => {
   const { cleaned, intents } = processIntents(response);
   storeMessage("assistant", cleaned);
   await Promise.all(intents);
+
+  // Send voice reply if requested and voice is enabled
+  if (voiceRequested && VOICE_REPLIES_ENABLED) {
+    const voicePath = await textToVoice(cleaned);
+    if (voicePath) {
+      await ctx.replyWithVoice(new InputFile(voicePath));
+      await unlink(voicePath).catch(() => {});
+    }
+  }
 
   await sendResponse(ctx, cleaned);
 
