@@ -176,7 +176,7 @@ bot.on("message:text", async (ctx) => {
   storeMessage("user", text);
 
   const enrichedPrompt = await buildPrompt(text);
-  const response = await callClaudeWithSearch(enrichedPrompt, { resume: true });
+  const response = await callClaudeWithSearch(enrichedPrompt, { resume: true, enableToolUse: true });
 
   const { cleaned, intents } = processIntents(response);
   storeMessage("assistant", cleaned);

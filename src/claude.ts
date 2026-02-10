@@ -45,9 +45,14 @@ let session = await loadSession();
 
 export async function callClaude(
   prompt: string,
-  options?: { resume?: boolean; imagePath?: string }
+  options?: { resume?: boolean; imagePath?: string; enableToolUse?: boolean }
 ): Promise<string> {
   const args = [CLAUDE_PATH, "-p", prompt];
+
+  // Enable autonomous code editing (guarded by security-guardrail.sh hook)
+  if (options?.enableToolUse) {
+    args.push("--dangerously-skip-permissions");
+  }
 
   // Resume previous session if available and requested
   if (options?.resume && session.sessionId) {
@@ -95,7 +100,7 @@ export async function callClaude(
 
 export async function callClaudeWithSearch(
   prompt: string,
-  options?: { resume?: boolean }
+  options?: { resume?: boolean; enableToolUse?: boolean }
 ): Promise<string> {
   const response = await callClaude(prompt, options);
 
