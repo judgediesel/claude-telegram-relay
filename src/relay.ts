@@ -184,11 +184,8 @@ bot.on("message:text", async (ctx) => {
   await ctx.replyWithChatAction("typing");
   storeMessage("user", text);
 
-  const enableToolUse = wantsToolUse(text);
-  if (enableToolUse) console.log("Tool use enabled for this message");
-
   const enrichedPrompt = await buildPrompt(text);
-  const response = await callClaudeWithSearch(enrichedPrompt, { resume: true, enableToolUse });
+  const response = await callClaudeWithSearch(enrichedPrompt, { resume: true, enableToolUse: true });
 
   const { cleaned, intents, followUp } = processIntents(response);
   storeMessage("assistant", cleaned);
