@@ -6,10 +6,12 @@ import { storeFact, storeGoal, completeGoal, storeTodo, completeTodo, storeHabit
 import { createCalendarEvent } from "./calendar";
 import { sendSMS, makeCall } from "./twilio";
 import { validateIntent, auditIntent } from "./intent-security";
+import { scanEmailsForEvents, approveEvents } from "./email-calendar";
 
-export function processIntents(response: string): { cleaned: string; intents: Promise<void>[] } {
+export function processIntents(response: string): { cleaned: string; intents: Promise<void>[]; followUp: Promise<string | null> } {
   let cleaned = response;
   const intents: Promise<void>[] = [];
+  let followUp: Promise<string | null> = Promise.resolve(null);
 
   // [REMEMBER: fact text]
   for (const match of response.matchAll(/\[REMEMBER:\s*(.+?)\]/gi)) {
@@ -125,11 +127,26 @@ export function processIntents(response: string): { cleaned: string; intents: Pr
     cleaned = cleaned.replace(match[0], "");
   }
 
+  // [SCAN_EMAILS] — scan recent emails for calendar events
+  if (/\[SCAN_EMAILS\]/i.test(response)) {
+    followUp = scanEmailsForEvents();
+    cleaned = cleaned.replace(/\[SCAN_EMAILS\]/gi, "");
+  }
+
+  // [APPROVE_EVENTS: all] or [APPROVE_EVENTS: 1, 3]
+  const approveMatch = response.match(/\[APPROVE_EVENTS:\s*(.+?)\]/i);
+  if (approveMatch) {
+    const val = approveMatch[1].trim().toLowerCase();
+    const indices = val === "all" ? "all" as const : val.split(/[,\s]+/).map(Number).filter((n) => !isNaN(n));
+    followUp = approveEvents(indices);
+    cleaned = cleaned.replace(/\[APPROVE_EVENTS:\s*.+?\]/gi, "");
+  }
+
   // [SEARCH: query] — handled by callClaudeWithSearch, but clean tag if it leaks through
   cleaned = cleaned.replace(/\[SEARCH:\s*.+?\]/gi, "");
 
   // Clean up extra whitespace left by removed tags
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
 
-  return { cleaned, intents };
+  return { cleaned, intents, followUp };
 }

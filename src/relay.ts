@@ -165,6 +165,14 @@ function wantsVoiceReply(text: string): boolean {
   return /\b(voice\s*(message|reply|response|memo|note)|send.*voice|reply.*voice|talk\s*to\s*me|say\s*(it|that|this|something)\s*(out\s*loud|in\s*voice|as\s*voice|sexy|back)|speak\s*to\s*me|read\s*(it|that|this)\s*(out\s*loud|to\s*me|aloud)|use\s*your\s*voice)\b/i.test(text);
 }
 
+// Detect if user is requesting code editing / file operations
+function wantsToolUse(text: string): boolean {
+  return /\b(edit|create|write|update|fix|refactor|add|remove|delete|change|modify|implement|build|debug|deploy)\b.*\b(file|code|function|component|module|script|config|class|test|bug|feature|endpoint|route|page|style|css|html|ts|js|tsx|jsx|py|src|repo|codebase)\b/i.test(text)
+    || /\b(file|code|function|component|module|script)\b.*\b(edit|create|write|update|fix|refactor|add|remove|delete|change|modify)\b/i.test(text)
+    || /\b(commit|push|pull request|PR|merge|branch|git)\b/i.test(text)
+    || /\b(npm|bun|pip|yarn)\s+(install|run|test|build)\b/i.test(text);
+}
+
 // Text messages
 bot.on("message:text", async (ctx) => {
   const text = ctx.message.text;
@@ -175,10 +183,13 @@ bot.on("message:text", async (ctx) => {
   await ctx.replyWithChatAction("typing");
   storeMessage("user", text);
 
-  const enrichedPrompt = await buildPrompt(text);
-  const response = await callClaudeWithSearch(enrichedPrompt, { resume: true, enableToolUse: true });
+  const enableToolUse = wantsToolUse(text);
+  if (enableToolUse) console.log("Tool use enabled for this message");
 
-  const { cleaned, intents } = processIntents(response);
+  const enrichedPrompt = await buildPrompt(text);
+  const response = await callClaudeWithSearch(enrichedPrompt, { resume: true, enableToolUse });
+
+  const { cleaned, intents, followUp } = processIntents(response);
   storeMessage("assistant", cleaned);
   await Promise.all(intents);
 
@@ -192,6 +203,13 @@ bot.on("message:text", async (ctx) => {
   }
 
   await sendResponse(ctx, cleaned);
+
+  // Handle follow-up messages (e.g., email scan results)
+  const followUpResult = await followUp;
+  if (followUpResult) {
+    storeMessage("assistant", followUpResult);
+    await sendResponse(ctx, followUpResult);
+  }
 
   // Auto-learn facts from this conversation (async, non-blocking)
   autoExtractFacts(text, cleaned).catch(() => {});
@@ -224,7 +242,7 @@ bot.on("message:voice", async (ctx) => {
     const enrichedPrompt = await buildPrompt(`[Voice message]: ${transcription}`);
     const claudeResponse = await callClaudeWithSearch(enrichedPrompt, { resume: true });
 
-    const { cleaned: cleanedVoice, intents: voiceIntents } = processIntents(claudeResponse);
+    const { cleaned: cleanedVoice, intents: voiceIntents, followUp: voiceFollowUp } = processIntents(claudeResponse);
     storeMessage("assistant", cleanedVoice);
     await Promise.all(voiceIntents);
 
@@ -237,6 +255,13 @@ bot.on("message:voice", async (ctx) => {
 
     // Always send text too (voice can be hard to hear, and shows the transcription)
     await sendResponse(ctx, `> ${transcription}\n\n${cleanedVoice}`);
+
+    // Handle follow-up messages (e.g., email scan results)
+    const voiceFollowUpResult = await voiceFollowUp;
+    if (voiceFollowUpResult) {
+      storeMessage("assistant", voiceFollowUpResult);
+      await sendResponse(ctx, voiceFollowUpResult);
+    }
 
     // Auto-extract action items from voice memos (async, non-blocking)
     autoExtractTodos(transcription).then((items) => {
@@ -279,11 +304,17 @@ bot.on("message:audio", async (ctx) => {
     const enrichedPrompt = await buildPrompt(audioUserMsg);
     const claudeResponse = await callClaudeWithSearch(enrichedPrompt, { resume: true });
 
-    const { cleaned: cleanedAudio, intents: audioIntents } = processIntents(claudeResponse);
+    const { cleaned: cleanedAudio, intents: audioIntents, followUp: audioFollowUp } = processIntents(claudeResponse);
     storeMessage("assistant", cleanedAudio);
     await Promise.all(audioIntents);
 
     await sendResponse(ctx, `> ${transcription}\n\n${cleanedAudio}`);
+
+    const audioFollowUpResult = await audioFollowUp;
+    if (audioFollowUpResult) {
+      storeMessage("assistant", audioFollowUpResult);
+      await sendResponse(ctx, audioFollowUpResult);
+    }
 
     autoExtractFacts(transcription, cleanedAudio).catch(() => {});
   } catch (error) {
@@ -324,11 +355,17 @@ bot.on("message:photo", async (ctx) => {
     // Cleanup after processing
     await unlink(filePath).catch(() => {});
 
-    const { cleaned: cleanedPhoto, intents: photoIntents } = processIntents(claudeResponse);
+    const { cleaned: cleanedPhoto, intents: photoIntents, followUp: photoFollowUp } = processIntents(claudeResponse);
     storeMessage("assistant", cleanedPhoto);
     await Promise.all(photoIntents);
 
     await sendResponse(ctx, cleanedPhoto);
+
+    const photoFollowUpResult = await photoFollowUp;
+    if (photoFollowUpResult) {
+      storeMessage("assistant", photoFollowUpResult);
+      await sendResponse(ctx, photoFollowUpResult);
+    }
   } catch (error) {
     console.error("Image error:", error);
     await ctx.reply("Could not process image.");
@@ -362,11 +399,17 @@ bot.on("message:document", async (ctx) => {
 
     await unlink(filePath).catch(() => {});
 
-    const { cleaned: cleanedDoc, intents: docIntents } = processIntents(claudeResponse);
+    const { cleaned: cleanedDoc, intents: docIntents, followUp: docFollowUp } = processIntents(claudeResponse);
     storeMessage("assistant", cleanedDoc);
     await Promise.all(docIntents);
 
     await sendResponse(ctx, cleanedDoc);
+
+    const docFollowUpResult = await docFollowUp;
+    if (docFollowUpResult) {
+      storeMessage("assistant", docFollowUpResult);
+      await sendResponse(ctx, docFollowUpResult);
+    }
   } catch (error) {
     console.error("Document error:", error);
     await ctx.reply("Could not process document.");
@@ -405,6 +448,7 @@ console.log(`Weekly habit report: ${CHECKIN_ENABLED ? "enabled (Sundays 5 PM)" :
 console.log(`Meta Ads: ${META_ADS_ENABLED ? "enabled" : "disabled (set META_ACCESS_TOKEN + META_AD_ACCOUNT_IDS)"}`);
 console.log(`Google Ads: ${GOOGLE_ADS_ENABLED ? "enabled" : "disabled (set GOOGLE_ADS_* env vars)"}`);
 console.log(`Voice memos: ${GEMINI_API_KEY ? "enabled (auto-extract action items)" : "disabled (set GEMINI_API_KEY)"}`);
+console.log(`Email-to-Calendar: ${GMAIL_ENABLED && CALENDAR_ENABLED ? "enabled (scan emails → create events)" : "disabled (requires Gmail + Calendar)"}`);
 
 bot.start({
   onStart: () => {

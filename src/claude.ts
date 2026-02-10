@@ -9,6 +9,7 @@ import {
   SESSION_FILE,
   MEMORY_ENABLED,
   CALENDAR_ENABLED,
+  GMAIL_ENABLED,
   GEMINI_API_KEY,
   TWILIO_ENABLED,
   RAYA_SYSTEM_PROMPT,
@@ -192,6 +193,10 @@ Contacts:
 SMS/Phone:${TWILIO_ENABLED ? `
 - [SMS: message text] — Send an SMS to the user's phone. Use for urgent reminders or when the user asks you to text them.
 - [CALL: message text] — Call the user's phone and speak a message. Use only for critical/emergency alerts or when the user explicitly asks.` : " (disabled)"}
+
+Email-to-Calendar:${GMAIL_ENABLED && CALENDAR_ENABLED ? `
+- [SCAN_EMAILS] — Scan recent emails for calendar events (meetings, flights, bookings, ICS attachments). Use when the user asks to check emails for events, or when they say "scan emails", "check my email for meetings", etc.
+- [APPROVE_EVENTS: all] or [APPROVE_EVENTS: 1, 3] — After scanning, create the approved events. Use when the user says "add all", "add 1 and 3", "yes create them", etc.` : " (disabled — requires Gmail + Calendar)"}
 
 Rules:
 - Use tags sparingly. Most messages need zero tags.
