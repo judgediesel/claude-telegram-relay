@@ -22,6 +22,8 @@ import { callClaude } from "./claude";
 import { processIntents } from "./intents";
 import { sendTelegramText } from "./telegram";
 import { makeCall } from "./twilio";
+import { scanEmailsForEvents } from "./email-calendar";
+import { GMAIL_ENABLED } from "./config";
 
 // ============================================================
 // SCHEDULED CHECK-INS
@@ -462,5 +464,44 @@ Write a brief, warm weekly habit report (5-8 lines). Include:
     console.log("Weekly habit report sent");
   } catch (error) {
     console.error("Weekly habit report error:", error);
+  }
+}
+
+// ============================================================
+// SCHEDULED EMAIL-TO-CALENDAR SCAN
+// Runs at 7am, 9am, 11am, 1pm, 3pm — scans emails for events
+// ============================================================
+
+const EMAIL_SCAN_HOURS = [7, 9, 11, 13, 15];
+let lastEmailScanHour = -1;
+
+export async function checkScheduledEmailScan(): Promise<void> {
+  if (!GMAIL_ENABLED || !CALENDAR_ENABLED) return;
+
+  const now = new Date();
+  const hour = now.getHours();
+  const minute = now.getMinutes();
+
+  // Only run during scan hours, within first 5 minutes of the hour
+  if (!EMAIL_SCAN_HOURS.includes(hour)) return;
+  if (minute > 5) return;
+  if (lastEmailScanHour === hour) return;
+
+  lastEmailScanHour = hour;
+
+  try {
+    console.log(`Scheduled email scan (${hour}:00)...`);
+    const result = await scanEmailsForEvents();
+
+    // Only notify if we found events
+    if (result.includes("potential calendar event")) {
+      await storeMessage("assistant", result, { source: "email_scan" });
+      await sendTelegramText(result);
+      console.log("Email scan: events found and sent to Telegram");
+    } else {
+      console.log(`Email scan: ${result}`);
+    }
+  } catch (error) {
+    console.error("Scheduled email scan error:", error);
   }
 }

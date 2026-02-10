@@ -57,6 +57,7 @@ import {
   checkDailyBriefing,
   checkEndOfDayRecap,
   checkWeeklyHabitReport,
+  checkScheduledEmailScan,
 } from "./checkin";
 
 // Ads monitoring
@@ -475,6 +476,11 @@ bot.start({
       setInterval(checkDailyBriefing, 60 * 1000);
       setInterval(checkEndOfDayRecap, 60 * 1000);
       setInterval(checkWeeklyHabitReport, 60 * 1000);
+    }
+
+    // Email-to-calendar scan: check every minute (runs at 7am, 9am, 11am, 1pm, 3pm)
+    if (GMAIL_ENABLED && CALENDAR_ENABLED) {
+      setInterval(checkScheduledEmailScan, 60 * 1000);
     }
 
     // Ad performance monitoring: check every 30 minutes
