@@ -1,37 +1,37 @@
 /**
  * Memory — Supabase-backed persistent memory, conversation buffer, todos, habits,
- *           vector search (Gemini embeddings), contacts/CRM
+ *           vector search (OpenAI embeddings), contacts/CRM
  */
 
-import { supabase, MEMORY_ENABLED, CONTEXT_MESSAGE_COUNT, GEMINI_API_KEY } from "./config";
+import { supabase, MEMORY_ENABLED, CONTEXT_MESSAGE_COUNT, GEMINI_API_KEY, OPENAI_API_KEY } from "./config";
 import type { ConversationMessage } from "./types";
 
-const GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
-
 // ============================================================
-// VECTOR EMBEDDINGS (Gemini)
+// VECTOR EMBEDDINGS (OpenAI text-embedding-3-small)
 // ============================================================
 
 // In-memory cache: fact ID → embedding vector
 const embeddingCache = new Map<string, { content: string; vector: number[] }>();
 
+const EMBEDDING_MODEL = "text-embedding-3-small";
 const EMBEDDING_DIMENSIONS = 1536; // Match Supabase pgvector column
 
 async function generateEmbedding(text: string): Promise<number[] | null> {
-  if (!GEMINI_API_KEY) return null;
+  if (!OPENAI_API_KEY) return null;
 
   try {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EMBEDDING_MODEL}:embedContent?key=${GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          content: { parts: [{ text }] },
-          outputDimensionality: EMBEDDING_DIMENSIONS,
-        }),
-      }
-    );
+    const res = await fetch("https://api.openai.com/v1/embeddings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: EMBEDDING_MODEL,
+        input: text,
+        dimensions: EMBEDDING_DIMENSIONS,
+      }),
+    });
 
     if (!res.ok) {
       console.error("Embedding API error:", await res.text());
@@ -39,7 +39,7 @@ async function generateEmbedding(text: string): Promise<number[] | null> {
     }
 
     const data = await res.json();
-    return data?.embedding?.values ?? null;
+    return data?.data?.[0]?.embedding ?? null;
   } catch (error) {
     console.error("generateEmbedding error:", error);
     return null;
@@ -58,11 +58,23 @@ function cosineSimilarity(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
-/** Load all fact embeddings into memory and backfill any missing ones */
+/** Load all fact embeddings into memory and backfill any missing ones.
+ *  On first run after model switch (Gemini → OpenAI), re-embeds all facts. */
 export async function initEmbeddings(): Promise<void> {
-  if (!supabase || !GEMINI_API_KEY) return;
+  if (!supabase || !OPENAI_API_KEY) return;
 
   try {
+    // Check if we need to re-embed due to model switch
+    const FLAG_CONTENT = `[SYSTEM] embedding_model:${EMBEDDING_MODEL}`;
+    const { data: modelFlag } = await supabase
+      .from("memory")
+      .select("id, content")
+      .eq("type", "fact")
+      .eq("content", FLAG_CONTENT)
+      .limit(1);
+
+    const needsReEmbed = !modelFlag || modelFlag.length === 0;
+
     const { data: facts } = await supabase
       .from("memory")
       .select("id, content, embedding")
@@ -70,44 +82,79 @@ export async function initEmbeddings(): Promise<void> {
 
     if (!facts || facts.length === 0) return;
 
-    const needsBackfill: typeof facts = [];
-
-    for (const fact of facts) {
-      // pgvector returns embeddings as a string like "[0.1,0.2,...]"
-      let vector: number[] | null = null;
-      if (fact.embedding) {
-        if (Array.isArray(fact.embedding)) {
-          vector = fact.embedding;
-        } else if (typeof fact.embedding === "string") {
-          try {
-            vector = JSON.parse(fact.embedding);
-          } catch { /* not parseable */ }
-        }
-      }
-
-      if (vector && vector.length > 0) {
-        embeddingCache.set(fact.id, { content: fact.content, vector });
-      } else {
-        needsBackfill.push(fact);
-      }
-    }
-
-    if (needsBackfill.length > 0) {
-      console.log(`Backfilling embeddings for ${needsBackfill.length} facts...`);
-      for (const fact of needsBackfill) {
+    if (needsReEmbed) {
+      // One-time re-embed: clear old Gemini embeddings, regenerate with OpenAI
+      console.log(`Re-embedding ${facts.length} facts with OpenAI ${EMBEDDING_MODEL}...`);
+      let done = 0;
+      for (const fact of facts) {
         const vector = await generateEmbedding(fact.content);
         if (vector) {
           embeddingCache.set(fact.id, { content: fact.content, vector });
-          // Try to store in DB — may fail if column type doesn't accept arrays
           await supabase
             .from("memory")
             .update({ embedding: vector })
             .eq("id", fact.id)
             .then(() => {})
             .catch(() => {});
+          done++;
+        }
+        // Brief pause every 50 to avoid rate limits
+        if (done % 50 === 0 && done > 0) {
+          console.log(`  Re-embedded ${done}/${facts.length}...`);
+          await new Promise((r) => setTimeout(r, 500));
         }
       }
-      console.log("Embedding backfill complete");
+      console.log(`Re-embedding complete: ${done}/${facts.length} facts`);
+
+      // Store model flag so we don't re-embed on next restart
+      const { error: flagErr } = await supabase.from("memory").insert({
+        type: "fact",
+        content: FLAG_CONTENT,
+      });
+      if (flagErr) {
+        console.error("Failed to store embedding model flag:", flagErr.message);
+      } else {
+        console.log("Stored embedding model flag — won't re-embed on next restart");
+      }
+    } else {
+      // Normal startup: load cached embeddings, backfill missing
+      const needsBackfill: typeof facts = [];
+
+      for (const fact of facts) {
+        let vector: number[] | null = null;
+        if (fact.embedding) {
+          if (Array.isArray(fact.embedding)) {
+            vector = fact.embedding;
+          } else if (typeof fact.embedding === "string") {
+            try {
+              vector = JSON.parse(fact.embedding);
+            } catch { /* not parseable */ }
+          }
+        }
+
+        if (vector && vector.length > 0) {
+          embeddingCache.set(fact.id, { content: fact.content, vector });
+        } else {
+          needsBackfill.push(fact);
+        }
+      }
+
+      if (needsBackfill.length > 0) {
+        console.log(`Backfilling embeddings for ${needsBackfill.length} facts...`);
+        for (const fact of needsBackfill) {
+          const vector = await generateEmbedding(fact.content);
+          if (vector) {
+            embeddingCache.set(fact.id, { content: fact.content, vector });
+            await supabase
+              .from("memory")
+              .update({ embedding: vector })
+              .eq("id", fact.id)
+              .then(() => {})
+              .catch(() => {});
+          }
+        }
+        console.log("Embedding backfill complete");
+      }
     }
 
     console.log(`Vector search: ${embeddingCache.size} facts indexed`);
@@ -118,7 +165,7 @@ export async function initEmbeddings(): Promise<void> {
 
 /** Find facts most relevant to a query using cosine similarity */
 export async function searchMemory(query: string, topK = 10): Promise<Array<{ content: string; score: number }>> {
-  if (embeddingCache.size === 0 || !GEMINI_API_KEY) return [];
+  if (embeddingCache.size === 0 || !OPENAI_API_KEY) return [];
 
   const queryVector = await generateEmbedding(query);
   if (!queryVector) return [];

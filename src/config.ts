@@ -32,7 +32,7 @@ export const supabase: SupabaseClient | null = MEMORY_ENABLED
   : null;
 
 // Scheduled check-ins
-export const CHECKIN_INTERVAL_MINUTES = parseInt(process.env.CHECKIN_INTERVAL_MINUTES || "30", 10);
+export const CHECKIN_INTERVAL_MINUTES = parseInt(process.env.CHECKIN_INTERVAL_MINUTES || "60", 10);
 export const CHECKIN_ENABLED = MEMORY_ENABLED; // check-ins need memory for context
 
 // Daily briefing
@@ -45,9 +45,11 @@ export const END_OF_DAY_HOUR = parseInt(process.env.END_OF_DAY_HOUR || "18", 10)
 const GOOGLE_CALENDAR_KEY_FILE = process.env.GOOGLE_CALENDAR_KEY_FILE
   || join(RELAY_DIR, "google-service-account.json");
 export const GOOGLE_CALENDAR_ID = process.env.GOOGLE_CALENDAR_ID || "primary";
+const GOOGLE_PERSONAL_CALENDAR_ID = process.env.GOOGLE_PERSONAL_CALENDAR_ID || "";
 
 export let CALENDAR_ENABLED = false;
 export let calendarClient: ReturnType<typeof google.calendar> | null = null;
+export let personalCalendarClient: ReturnType<typeof google.calendar> | null = null;
 
 try {
   await stat(GOOGLE_CALENDAR_KEY_FILE);
@@ -59,6 +61,40 @@ try {
   CALENDAR_ENABLED = true;
 } catch {
   // Key file doesn't exist or is unreadable — calendar stays disabled
+}
+
+// Calendar name aliases → calendar IDs
+// "titan" / "titanexclusive" → GOOGLE_CALENDAR_ID (workspace, service account)
+// "personal" / "markph1978" → GOOGLE_PERSONAL_CALENDAR_ID (OAuth)
+const CALENDAR_ALIASES: Record<string, string> = {
+  titan: GOOGLE_CALENDAR_ID,
+  titanexclusive: GOOGLE_CALENDAR_ID,
+  "mark@titanexclusive.com": GOOGLE_CALENDAR_ID,
+  default: GOOGLE_CALENDAR_ID,
+};
+
+if (GOOGLE_PERSONAL_CALENDAR_ID) {
+  CALENDAR_ALIASES.personal = GOOGLE_PERSONAL_CALENDAR_ID;
+  CALENDAR_ALIASES.markph1978 = GOOGLE_PERSONAL_CALENDAR_ID;
+  CALENDAR_ALIASES["markph1978@gmail.com"] = GOOGLE_PERSONAL_CALENDAR_ID;
+}
+
+/** Resolve a friendly calendar name to a calendar ID. Returns undefined if not found. */
+export function resolveCalendarId(name?: string): string | undefined {
+  if (!name) return undefined;
+  const lower = name.toLowerCase().trim();
+  return CALENDAR_ALIASES[lower] || undefined;
+}
+
+/** Get all configured calendar IDs with their display names, for multi-calendar reads */
+export function getAllCalendarIds(): Array<{ id: string; name: string }> {
+  const calendars: Array<{ id: string; name: string }> = [
+    { id: GOOGLE_CALENDAR_ID, name: "titan" },
+  ];
+  if (GOOGLE_PERSONAL_CALENDAR_ID && personalCalendarClient) {
+    calendars.push({ id: GOOGLE_PERSONAL_CALENDAR_ID, name: "personal" });
+  }
+  return calendars;
 }
 
 // Gmail — supports multiple accounts
@@ -101,6 +137,11 @@ try {
     const personalEmail = profile.data.emailAddress || "personal";
     gmailClients.push({ label: personalEmail, client: personalGmail });
     GMAIL_ENABLED = true;
+
+    // Also set up personal calendar if configured
+    if (GOOGLE_PERSONAL_CALENDAR_ID) {
+      personalCalendarClient = google.calendar({ version: "v3", auth: oauth2 });
+    }
   }
 } catch {
   // Personal Gmail token not found or invalid
@@ -114,6 +155,15 @@ export const TWILIO_SMS_NUMBER = process.env.TWILIO_SMS_NUMBER || ""; // Toll-fr
 export const TWILIO_USER_PHONE = process.env.TWILIO_USER_PHONE || "";
 export const TWILIO_PUBLIC_URL = process.env.TWILIO_PUBLIC_URL || "";
 export const TWILIO_ENABLED = !!(TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_PHONE_NUMBER && TWILIO_USER_PHONE);
+
+// Group chat support
+export const ALLOWED_GROUP_IDS = (process.env.ALLOWED_GROUP_IDS || "")
+  .split(",").map((id) => id.trim()).filter(Boolean);
+export const TEAM_MEMBER_IDS = (process.env.TEAM_MEMBER_IDS || "")
+  .split(",").map((id) => id.trim()).filter(Boolean);
+
+// OpenAI (embeddings)
+export const OPENAI_API_KEY = process.env["OPENAI_API_KEY"] ?? "";
 
 // Voice support
 export const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
