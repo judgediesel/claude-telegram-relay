@@ -14,6 +14,8 @@ import { join } from "path";
 import {
   BOT_TOKEN,
   ALLOWED_USER_ID,
+  ALLOWED_GROUP_IDS,
+  TEAM_MEMBER_IDS,
   TEMP_DIR,
   UPLOADS_DIR,
   LOCK_FILE,
@@ -38,10 +40,37 @@ import {
 import { storeMessage, initEmbeddings, autoExtractFacts, autoExtractTodos } from "./memory";
 
 // Claude CLI
-import { callClaudeWithSearch, buildPrompt } from "./claude";
+import { callClaudeWithSearch, buildPrompt, type GroupChatInfo } from "./claude";
 
 // Intent processing
 import { processIntents } from "./intents";
+
+// Strip all action tags except SEARCH for team members
+function processIntentsForRole(response: string, role: UserRole) {
+  if (role === "admin") return processIntents(response);
+
+  // Team members: strip all sensitive tags, only allow SEARCH to pass through
+  let cleaned = response;
+  // Remove all tags except SEARCH
+  cleaned = cleaned.replace(/\[REMEMBER:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[GOAL:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[DONE:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[TODO:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[TODO_DONE:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[HABIT:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[HABIT_DONE:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[HABIT_REMOVE:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[CALENDAR:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[SMS:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[CALL:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[CONTACT:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\[SCAN_EMAILS\]/gi, "");
+  cleaned = cleaned.replace(/\[APPROVE_EVENTS:\s*.+?\]/gi, "");
+  // Let SEARCH tags pass through to callClaudeWithSearch
+  cleaned = cleaned.replace(/\[SEARCH:\s*.+?\]/gi, "");
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+  return { cleaned, intents: [] as Promise<void>[], followUp: Promise.resolve(null as string | null) };
+}
 
 // Voice
 import { transcribeAudio, textToVoice } from "./voice";
@@ -62,6 +91,7 @@ import {
 
 // Ads monitoring
 import { checkAdPerformance, ADS_ENABLED, META_ADS_ENABLED, GOOGLE_ADS_ENABLED } from "./ads";
+import { startUptimeMonitor } from "./uptime";
 
 // Webhook HTTP server
 import { startWebhookServer } from "./webhook";
@@ -141,18 +171,92 @@ if (!(await acquireLock())) {
 const bot = new Bot(BOT_TOKEN);
 
 // ============================================================
-// SECURITY: Only respond to authorized user
+// SECURITY: Authorization with group chat support
 // ============================================================
 
-bot.use(async (ctx, next) => {
-  const userId = ctx.from?.id.toString();
+type ChatType = "private" | "group" | "supergroup" | "channel";
+type UserRole = "admin" | "team" | "unauthorized";
 
-  // If ALLOWED_USER_ID is set, enforce it
-  if (ALLOWED_USER_ID && userId !== ALLOWED_USER_ID) {
-    console.log(`Unauthorized: ${userId}`);
-    await ctx.reply("This bot is private.");
-    return;
+interface ChatContext {
+  chatType: ChatType;
+  chatId: string;
+  userId: string;
+  username: string;
+  firstName: string;
+  userRole: UserRole;
+  isGroup: boolean;
+  isBotMentioned: boolean;
+  isReplyToBot: boolean;
+  shouldRespond: boolean;
+}
+
+// Store per-request chat context
+const chatContextMap = new WeakMap<object, ChatContext>();
+
+function getChatContext(ctx: any): ChatContext | undefined {
+  return chatContextMap.get(ctx);
+}
+
+bot.use(async (ctx, next) => {
+  const userId = ctx.from?.id.toString() || "";
+  const chatType = (ctx.chat?.type || "private") as ChatType;
+  const chatId = ctx.chat?.id.toString() || "";
+  const isGroup = chatType === "group" || chatType === "supergroup";
+
+  // Determine user role
+  let userRole: UserRole = "unauthorized";
+  if (ALLOWED_USER_ID && userId === ALLOWED_USER_ID) {
+    userRole = "admin";
+  } else if (TEAM_MEMBER_IDS.includes(userId)) {
+    userRole = "team";
   }
+
+  // Private chat: only admin allowed
+  if (!isGroup) {
+    if (userRole !== "admin") {
+      console.log(`Unauthorized DM: ${userId}`);
+      await ctx.reply("This bot is private.");
+      return;
+    }
+  } else {
+    // Group chat: must be an allowed group
+    if (ALLOWED_GROUP_IDS.length > 0 && !ALLOWED_GROUP_IDS.includes(chatId)) {
+      console.log(`Unauthorized group: ${chatId}`);
+      return; // Silently ignore messages from non-allowed groups
+    }
+
+    // In groups, only admin and team members can interact
+    if (userRole === "unauthorized") {
+      console.log(`Unauthorized group user: ${userId} in ${chatId}`);
+      return;
+    }
+  }
+
+  // Check if bot is being addressed in group chats
+  const botUsername = ctx.me?.username || "";
+  const messageText = ctx.message?.text || ctx.message?.caption || "";
+  const isBotMentioned = isGroup && botUsername
+    ? new RegExp(`@${botUsername}\\b`, "i").test(messageText)
+    : false;
+  const isReplyToBot = isGroup && ctx.message?.reply_to_message?.from?.id === ctx.me?.id;
+
+  // In groups, only respond when mentioned or replied to
+  const shouldRespond = !isGroup || isBotMentioned || isReplyToBot;
+
+  const chatContext: ChatContext = {
+    chatType,
+    chatId,
+    userId,
+    username: ctx.from?.username || "",
+    firstName: ctx.from?.first_name || "",
+    userRole,
+    isGroup,
+    isBotMentioned,
+    isReplyToBot,
+    shouldRespond,
+  };
+
+  chatContextMap.set(ctx, chatContext);
 
   await next();
 });
@@ -176,23 +280,43 @@ function wantsToolUse(text: string): boolean {
 
 // Text messages
 bot.on("message:text", async (ctx) => {
-  const text = ctx.message.text;
-  console.log(`Message: ${text.substring(0, 50)}...`);
+  const chatCtx = getChatContext(ctx);
+  if (!chatCtx) return;
+
+  // In group chats, only respond when mentioned or replied to
+  if (!chatCtx.shouldRespond) return;
+
+  let text = ctx.message.text;
+  // Strip @bot mention from text before processing
+  if (chatCtx.isGroup && ctx.me?.username) {
+    text = text.replace(new RegExp(`@${ctx.me.username}\\b`, "gi"), "").trim();
+  }
+
+  console.log(`Message [${chatCtx.isGroup ? "group" : "DM"}/${chatCtx.userRole}]: ${text.substring(0, 50)}...`);
 
   const voiceRequested = wantsVoiceReply(text);
 
   await ctx.replyWithChatAction("typing");
-  storeMessage("user", text);
 
-  const enrichedPrompt = await buildPrompt(text);
-  const response = await callClaudeWithSearch(enrichedPrompt, { resume: true, enableToolUse: true });
+  const groupInfo: GroupChatInfo = {
+    isGroup: chatCtx.isGroup,
+    userRole: chatCtx.userRole,
+    senderName: chatCtx.firstName,
+    senderUsername: chatCtx.username,
+  };
 
-  const { cleaned, intents, followUp } = processIntents(response);
-  storeMessage("assistant", cleaned);
+  storeMessage("user", text, chatCtx.isGroup ? { source: "group", sender: chatCtx.username || chatCtx.firstName, chat_id: chatCtx.chatId } : undefined);
+
+  const enrichedPrompt = await buildPrompt(text, groupInfo);
+  // Only enable tool use for admin
+  const response = await callClaudeWithSearch(enrichedPrompt, { resume: !chatCtx.isGroup, enableToolUse: chatCtx.userRole === "admin" });
+
+  const { cleaned, intents, followUp } = processIntentsForRole(response, chatCtx.userRole);
+  storeMessage("assistant", cleaned, chatCtx.isGroup ? { source: "group", chat_id: chatCtx.chatId } : undefined);
   await Promise.all(intents);
 
-  // Send voice reply if requested and voice is enabled
-  if (voiceRequested && VOICE_REPLIES_ENABLED) {
+  // Voice replies only in DMs for admin
+  if (voiceRequested && VOICE_REPLIES_ENABLED && !chatCtx.isGroup) {
     const voicePath = await textToVoice(cleaned);
     if (voicePath) {
       await ctx.replyWithVoice(new InputFile(voicePath));
@@ -202,19 +326,31 @@ bot.on("message:text", async (ctx) => {
 
   await sendResponse(ctx, cleaned);
 
-  // Handle follow-up messages (e.g., email scan results)
-  const followUpResult = await followUp;
-  if (followUpResult) {
-    storeMessage("assistant", followUpResult);
-    await sendResponse(ctx, followUpResult);
+  // Handle follow-up messages (only for admin)
+  if (chatCtx.userRole === "admin") {
+    const followUpResult = await followUp;
+    if (followUpResult) {
+      storeMessage("assistant", followUpResult);
+      await sendResponse(ctx, followUpResult);
+    }
   }
 
-  // Auto-learn facts from this conversation (async, non-blocking)
-  autoExtractFacts(text, cleaned).catch(() => {});
+  // Auto-learn only from admin conversations
+  if (chatCtx.userRole === "admin") {
+    autoExtractFacts(text, cleaned).catch(() => {});
+  }
 });
 
 // Voice messages
 bot.on("message:voice", async (ctx) => {
+  const chatCtx = getChatContext(ctx);
+  if (!chatCtx) return;
+
+  // In groups, voice messages only processed if replying to bot
+  if (chatCtx.isGroup && !chatCtx.isReplyToBot) return;
+  // Voice only for admin
+  if (chatCtx.userRole !== "admin") return;
+
   console.log("Voice message received");
   await ctx.replyWithChatAction("typing");
 
@@ -224,44 +360,47 @@ bot.on("message:voice", async (ctx) => {
   }
 
   try {
-    // Download voice file from Telegram
     const file = await ctx.api.getFile(ctx.message.voice.file_id);
     const response = await fetch(
       `https://api.telegram.org/file/bot${BOT_TOKEN}/${file.file_path}`
     );
     const audioBuffer = Buffer.from(await response.arrayBuffer());
 
-    // Transcribe with Gemini
     const transcription = await transcribeAudio(audioBuffer);
     console.log(`Transcription: ${transcription.substring(0, 80)}...`);
 
-    // Send to Claude
+    const groupInfo: GroupChatInfo = {
+      isGroup: chatCtx.isGroup,
+      userRole: chatCtx.userRole,
+      senderName: chatCtx.firstName,
+      senderUsername: chatCtx.username,
+    };
+
     storeMessage("user", `[Voice message]: ${transcription}`);
-    const enrichedPrompt = await buildPrompt(`[Voice message]: ${transcription}`);
-    const claudeResponse = await callClaudeWithSearch(enrichedPrompt, { resume: true });
+    const enrichedPrompt = await buildPrompt(`[Voice message]: ${transcription}`, groupInfo);
+    const claudeResponse = await callClaudeWithSearch(enrichedPrompt, { resume: !chatCtx.isGroup });
 
     const { cleaned: cleanedVoice, intents: voiceIntents, followUp: voiceFollowUp } = processIntents(claudeResponse);
     storeMessage("assistant", cleanedVoice);
     await Promise.all(voiceIntents);
 
-    // Try voice reply if enabled
-    const voicePath = await textToVoice(cleanedVoice);
-    if (voicePath) {
-      await ctx.replyWithVoice(new InputFile(voicePath));
-      await unlink(voicePath).catch(() => {});
+    // Voice replies only in DMs
+    if (!chatCtx.isGroup) {
+      const voicePath = await textToVoice(cleanedVoice);
+      if (voicePath) {
+        await ctx.replyWithVoice(new InputFile(voicePath));
+        await unlink(voicePath).catch(() => {});
+      }
     }
 
-    // Always send text too (voice can be hard to hear, and shows the transcription)
     await sendResponse(ctx, `> ${transcription}\n\n${cleanedVoice}`);
 
-    // Handle follow-up messages (e.g., email scan results)
     const voiceFollowUpResult = await voiceFollowUp;
     if (voiceFollowUpResult) {
       storeMessage("assistant", voiceFollowUpResult);
       await sendResponse(ctx, voiceFollowUpResult);
     }
 
-    // Auto-extract action items from voice memos (async, non-blocking)
     autoExtractTodos(transcription).then((items) => {
       if (items.length > 0) {
         const itemList = items.map((i) => `• ${i}`).join("\n");
@@ -278,6 +417,11 @@ bot.on("message:voice", async (ctx) => {
 
 // Audio file attachments
 bot.on("message:audio", async (ctx) => {
+  const chatCtx = getChatContext(ctx);
+  if (!chatCtx) return;
+  if (chatCtx.isGroup) return; // Audio files only in DMs
+  if (chatCtx.userRole !== "admin") return;
+
   console.log(`Audio file received: ${ctx.message.audio.file_name || "unknown"}`);
   await ctx.replyWithChatAction("typing");
 
@@ -323,16 +467,19 @@ bot.on("message:audio", async (ctx) => {
 
 // Photos/Images
 bot.on("message:photo", async (ctx) => {
+  const chatCtx = getChatContext(ctx);
+  if (!chatCtx) return;
+  if (chatCtx.isGroup) return; // Photos only in DMs
+  if (chatCtx.userRole !== "admin") return;
+
   console.log("Image received");
   await ctx.replyWithChatAction("typing");
 
   try {
-    // Get highest resolution photo
     const photos = ctx.message.photo;
     const photo = photos[photos.length - 1];
     const file = await ctx.api.getFile(photo.file_id);
 
-    // Download the image
     const timestamp = Date.now();
     const filePath = join(UPLOADS_DIR, `image_${timestamp}.jpg`);
 
@@ -342,7 +489,6 @@ bot.on("message:photo", async (ctx) => {
     const buffer = await response.arrayBuffer();
     await writeFile(filePath, Buffer.from(buffer));
 
-    // Claude Code can see images via file path
     const caption = ctx.message.caption || "Analyze this image.";
     const photoUserMsg = `[Image: ${filePath}]\n\n${caption}`;
     storeMessage("user", `[Photo] ${caption}`);
@@ -350,7 +496,6 @@ bot.on("message:photo", async (ctx) => {
     const enrichedPrompt = await buildPrompt(photoUserMsg);
     const claudeResponse = await callClaudeWithSearch(enrichedPrompt, { resume: true });
 
-    // Cleanup after processing
     await unlink(filePath).catch(() => {});
 
     const { cleaned: cleanedPhoto, intents: photoIntents, followUp: photoFollowUp } = processIntents(claudeResponse);
@@ -372,6 +517,11 @@ bot.on("message:photo", async (ctx) => {
 
 // Documents
 bot.on("message:document", async (ctx) => {
+  const chatCtx = getChatContext(ctx);
+  if (!chatCtx) return;
+  if (chatCtx.isGroup) return; // Documents only in DMs
+  if (chatCtx.userRole !== "admin") return;
+
   const doc = ctx.message.document;
   console.log(`Document: ${doc.file_name}`);
   await ctx.replyWithChatAction("typing");
@@ -440,13 +590,16 @@ console.log(`Twilio Voice: ${TWILIO_ENABLED ? `enabled (${TWILIO_PHONE_NUMBER})`
 console.log(`Daily briefing: ${CHECKIN_ENABLED ? `enabled (${DAILY_BRIEFING_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`End-of-day recap: ${CHECKIN_ENABLED ? `enabled (${END_OF_DAY_HOUR}:00)` : "disabled (requires memory)"}`);
 console.log(`Post-meeting debrief: ${CALENDAR_ENABLED && CHECKIN_ENABLED ? "enabled" : "disabled (requires calendar + memory)"}`);
-console.log(`Reminders: ${CALENDAR_ENABLED ? "enabled (15 min before events)" : "disabled (requires calendar)"}`);
-console.log(`Check-ins: ${CHECKIN_ENABLED ? `enabled (every ${CHECKIN_INTERVAL_MINUTES} min)` : "disabled (requires memory)"}`);
+console.log(`Reminders: ${CALENDAR_ENABLED ? "enabled (2 min before events)" : "disabled (requires calendar)"}`);
+console.log(`Check-ins: ${CHECKIN_ENABLED ? `enabled (every ${CHECKIN_INTERVAL_MINUTES} min / hourly)` : "disabled (requires memory)"}`);
 console.log(`Weekly habit report: ${CHECKIN_ENABLED ? "enabled (Sundays 5 PM)" : "disabled (requires memory)"}`);
 console.log(`Meta Ads: ${META_ADS_ENABLED ? "enabled" : "disabled (set META_ACCESS_TOKEN + META_AD_ACCOUNT_IDS)"}`);
 console.log(`Google Ads: ${GOOGLE_ADS_ENABLED ? "enabled" : "disabled (set GOOGLE_ADS_* env vars)"}`);
 console.log(`Voice memos: ${GEMINI_API_KEY ? "enabled (auto-extract action items)" : "disabled (set GEMINI_API_KEY)"}`);
 console.log(`Email-to-Calendar: ${GMAIL_ENABLED && CALENDAR_ENABLED ? "enabled (scan emails → create events)" : "disabled (requires Gmail + Calendar)"}`);
+console.log(`Group chats: ${ALLOWED_GROUP_IDS.length > 0 ? `enabled (${ALLOWED_GROUP_IDS.length} group(s))` : "disabled (set ALLOWED_GROUP_IDS)"}`);
+console.log(`Team members: ${TEAM_MEMBER_IDS.length > 0 ? `${TEAM_MEMBER_IDS.length} configured` : "none (set TEAM_MEMBER_IDS)"}`);
+console.log("Uptime monitor: enabled (4 sites, every 30 min)");
 
 bot.start({
   onStart: () => {
@@ -460,9 +613,9 @@ bot.start({
       }, 5 * 60 * 1000);
     }
 
-    // Proactive calendar reminders + post-meeting debrief: check every 5 minutes
+    // Proactive calendar reminders: check every minute (2-min-before alerts)
     if (CALENDAR_ENABLED) {
-      setInterval(checkUpcomingReminders, 5 * 60 * 1000);
+      setInterval(checkUpcomingReminders, 60 * 1000);
       if (CHECKIN_ENABLED) {
         setInterval(checkPostMeetingDebrief, 5 * 60 * 1000);
       }
@@ -488,5 +641,8 @@ bot.start({
         setInterval(checkAdPerformance, 30 * 60 * 1000);
       }, 2 * 60 * 1000);
     }
+
+    // Uptime monitor: check 4 sites every 30 minutes, alert only on issues
+    startUptimeMonitor();
   },
 });

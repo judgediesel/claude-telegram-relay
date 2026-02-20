@@ -7,7 +7,15 @@
 
 import { getRecentEmailsFull, type EmailDetail } from "./gmail";
 import { createCalendarEvent } from "./calendar";
-import { GMAIL_ENABLED, CALENDAR_ENABLED } from "./config";
+import { GMAIL_ENABLED, CALENDAR_ENABLED, GOOGLE_CALENDAR_ID } from "./config";
+
+/** Map email account to calendar name. Titan emails → titan calendar, personal → personal. */
+function calendarForAccount(account: string): string | undefined {
+  const lower = account.toLowerCase();
+  if (lower.includes("titanexclusive")) return "titan";
+  if (lower.includes("markph1978")) return "personal";
+  return undefined; // falls back to default
+}
 
 export interface ProposedEvent {
   title: string;
@@ -19,6 +27,7 @@ export interface ProposedEvent {
   emailFrom: string;
   confidence: "high" | "medium" | "low";
   location?: string;
+  calendarName?: string; // which calendar to add to (e.g. "titan", "personal")
 }
 
 // Track which emails we've already scanned to avoid duplicates
@@ -54,13 +63,21 @@ export async function scanEmailsForEvents(): Promise<string> {
     // Parse ICS attachments first (highest confidence)
     const icsEvents = newEmails
       .filter((e) => e.hasICS && e.icsData)
-      .map((e) => parseICS(e))
+      .map((e) => {
+        const ev = parseICS(e);
+        if (ev) ev.calendarName = calendarForAccount(e.account);
+        return ev;
+      })
       .filter((e): e is ProposedEvent => e !== null);
 
     // Parse email bodies for event-like content
     const bodyEvents = newEmails
       .filter((e) => isEventLikeEmail(e))
-      .map((e) => parseEmailForEvent(e))
+      .map((e) => {
+        const ev = parseEmailForEvent(e);
+        if (ev) ev.calendarName = calendarForAccount(e.account);
+        return ev;
+      })
       .filter((e): e is ProposedEvent => e !== null);
 
     const allEvents = [...icsEvents, ...bodyEvents];
@@ -72,7 +89,8 @@ export async function scanEmailsForEvents(): Promise<string> {
     // Format for Claude to present to user
     const eventLines = allEvents.map((ev, i) => {
       const loc = ev.location ? ` | Location: ${ev.location}` : "";
-      return `${i + 1}. **${ev.title}**\n   ${ev.date} at ${ev.time} (${ev.duration} min)${loc}\n   From: ${ev.emailFrom} — "${ev.emailSubject}"\n   Confidence: ${ev.confidence} | Source: ${ev.source}`;
+      const cal = ev.calendarName ? ` | Calendar: ${ev.calendarName}` : "";
+      return `${i + 1}. **${ev.title}**\n   ${ev.date} at ${ev.time} (${ev.duration} min)${loc}${cal}\n   From: ${ev.emailFrom} — "${ev.emailSubject}"\n   Confidence: ${ev.confidence} | Source: ${ev.source}`;
     });
 
     // Store proposed events for approval
@@ -111,8 +129,9 @@ export async function approveEvents(indices: number[] | "all"): Promise<string> 
 
   for (const event of toCreate) {
     try {
-      await createCalendarEvent(event.title, event.date, event.time, event.duration);
-      results.push(`Added: ${event.title} on ${event.date} at ${event.time}`);
+      await createCalendarEvent(event.title, event.date, event.time, event.duration, event.calendarName);
+      const calLabel = event.calendarName ? ` [${event.calendarName}]` : "";
+      results.push(`Added: ${event.title} on ${event.date} at ${event.time}${calLabel}`);
     } catch (error) {
       results.push(`Failed: ${event.title} — ${error}`);
     }

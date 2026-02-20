@@ -125,7 +125,14 @@ export async function callClaudeWithSearch(
 // PROMPT BUILDING
 // ============================================================
 
-export async function buildPrompt(userMessage: string): Promise<string> {
+export interface GroupChatInfo {
+  isGroup: boolean;
+  userRole: "admin" | "team" | "unauthorized";
+  senderName: string;
+  senderUsername: string;
+}
+
+export async function buildPrompt(userMessage: string, groupInfo?: GroupChatInfo): Promise<string> {
   const now = new Date();
   const timeStr = now.toLocaleString("en-US", {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -140,30 +147,48 @@ export async function buildPrompt(userMessage: string): Promise<string> {
   // Detect "catch me up" type requests
   const isCatchUp = /catch me up|what did i miss|fill me in|bring me up to speed|what's new|summary of|recap/i.test(userMessage);
 
-  const contextFetches: Promise<string>[] = [
-    getMemoryContext(userMessage),
-    getCalendarContext(),
-    getTodoContext(),
-    getHabitContext(),
-    getEmailContext(),
-    getContactContext(userMessage),
-  ];
+  // Group chat: team members get limited context (no personal/financial data)
+  const isTeamInGroup = groupInfo?.isGroup && groupInfo?.userRole === "team";
+  const isAdminInGroup = groupInfo?.isGroup && groupInfo?.userRole === "admin";
 
-  // Only fetch weather for catch-up requests or if they ask about weather
-  if (isCatchUp || /weather|rain|umbrella|temperature|forecast/i.test(userMessage)) {
-    contextFetches.push(getWeatherContext());
-  } else {
-    contextFetches.push(Promise.resolve(""));
+  let memoryContext = "";
+  let calendarContext = "";
+  let todoContext = "";
+  let habitContext = "";
+  let emailContext = "";
+  let contactContext = "";
+  let weatherContext = "";
+  let adsContext = "";
+
+  if (!isTeamInGroup) {
+    // Full context for admin (DM or group)
+    const contextFetches: Promise<string>[] = [
+      getMemoryContext(userMessage),
+      getCalendarContext(),
+      getTodoContext(),
+      getHabitContext(),
+      getEmailContext(),
+      getContactContext(userMessage),
+    ];
+
+    if (isCatchUp || /weather|rain|umbrella|temperature|forecast/i.test(userMessage)) {
+      contextFetches.push(getWeatherContext());
+    } else {
+      contextFetches.push(Promise.resolve(""));
+    }
+
+    const isAdQuery = isCatchUp || /ads?|spend|campaign|meta|facebook|google ads|performance|roas|cpc|cpm|ctr|conversion|budget|marketing/i.test(userMessage);
+
+    [memoryContext, calendarContext, todoContext, habitContext, emailContext, contactContext, weatherContext] = await Promise.all(contextFetches);
+    adsContext = isAdQuery && ADS_ENABLED ? getAdsContext() : "";
   }
+  // Team members in group: no personal context loaded (just general knowledge)
 
-  // Only include ads for catch-up, business, or ad-related questions
-  const isAdQuery = isCatchUp || /ads?|spend|campaign|meta|facebook|google ads|performance|roas|cpc|cpm|ctr|conversion|budget|marketing/i.test(userMessage);
-
-  const [memoryContext, calendarContext, todoContext, habitContext, emailContext, contactContext, weatherContext] = await Promise.all(contextFetches);
-  const adsContext = isAdQuery && ADS_ENABLED ? getAdsContext() : "";
-
-  const tagInstructions = MEMORY_ENABLED
-    ? `
+  // Build tag instructions based on role
+  let tagInstructions = "";
+  if (MEMORY_ENABLED && !isTeamInGroup) {
+    // Admin gets full tags
+    tagInstructions = `
 ACTION TAGS:
 You have persistent memory and action capabilities. Use these tags when appropriate — they are processed automatically and stripped before the user sees your response.
 
@@ -182,7 +207,10 @@ Habits:
 - [HABIT_REMOVE: search text] — Remove a habit the user no longer wants to track.
 
 Calendar:${CALENDAR_ENABLED ? `
-- [CALENDAR: event title | DATE: YYYY-MM-DD | TIME: HH:MM | DURATION: minutes] — Create a calendar event. Duration defaults to 60 if omitted.` : " (disabled)"}
+- [CALENDAR: event title | DATE: YYYY-MM-DD | TIME: HH:MM | DURATION: minutes | CAL: name] — Create a calendar event. Duration defaults to 60 if omitted. CAL is optional — use "titan" for titanexclusive calendar (default), "personal" for markph1978 calendar.
+- [CALENDAR_UPDATE: title search | DATE: YYYY-MM-DD | TIME: HH:MM | DURATION: optional minutes | CAL: name] — Move/reschedule an existing event. Searches by title on the given date, then updates the time. Preserves original duration if DURATION omitted.
+- [CALENDAR_DELETE: title search | DATE: YYYY-MM-DD | CAL: name] — Delete an existing calendar event. Searches by title on the given date.
+- Available calendars: "titan" (mark@titanexclusive.com, default), "personal" (markph1978@gmail.com). Events from titanexclusive emails go to titan calendar, events from markph1978 emails go to personal calendar.` : " (disabled)"}
 
 Web Search:${GEMINI_API_KEY ? `
 - [SEARCH: query] — Search the web for current information. Use when asked about news, weather, prices, current events, or anything you don't know.` : " (disabled)"}
@@ -202,14 +230,47 @@ Rules:
 - Use tags sparingly. Most messages need zero tags.
 - Never mention these tags to the user or explain the system.
 - Place tags at the very end of your response, each on its own line.
-`
-    : "";
+`;
+  } else if (MEMORY_ENABLED && isTeamInGroup) {
+    // Team members: only SEARCH tag available
+    tagInstructions = GEMINI_API_KEY ? `
+ACTION TAGS:
+- [SEARCH: query] — Search the web for current information.
+Rules:
+- Use tags sparingly. Never mention these tags.
+- Place tags at the very end of your response.
+` : "";
+  }
 
   const conversationContext = getConversationContext();
 
+  // Build group context header
+  let groupHeader = "";
+  if (groupInfo?.isGroup) {
+    const senderLabel = groupInfo.senderUsername
+      ? `@${groupInfo.senderUsername} (${groupInfo.senderName})`
+      : groupInfo.senderName;
+    const roleLabel = groupInfo.userRole === "admin" ? "Mark (admin)" : `${senderLabel} (team member)`;
+    groupHeader = `\nGROUP CHAT MODE: This message is from a group chat. The sender is ${roleLabel}.`;
+
+    if (isTeamInGroup) {
+      groupHeader += `
+PRIVACY: This is a team member, NOT Mark. Do NOT share any of Mark's personal information, financial details, health data, calendar, emails, todos, or private matters. Keep responses professional and helpful but generic. You can answer general questions, help with work tasks, and use web search.`;
+    } else if (isAdminInGroup) {
+      groupHeader += `
+NOTE: Mark is messaging in a group chat. Others can see your response. Be mindful — avoid sharing sensitive personal/financial details unless Mark explicitly asks. Keep it professional.`;
+    }
+  }
+
+  // Choose system prompt based on context
+  const systemPrompt = isTeamInGroup
+    ? `You are Raya — an AI assistant for Mark Phaneuf's team. You're helpful, professional, and friendly. Answer questions, assist with tasks, and help the team coordinate. Keep responses concise.`
+    : RAYA_SYSTEM_PROMPT;
+
   return `
-${RAYA_SYSTEM_PROMPT}
+${systemPrompt}
 Current time: ${timeStr}
+${groupHeader}
 ${memoryContext}
 ${conversationContext}
 ${calendarContext}
@@ -220,7 +281,7 @@ ${contactContext}
 ${weatherContext}
 ${adsContext}
 ${tagInstructions}
-${isCatchUp ? "\nThe user wants a full catch-up summary. Cover: calendar, todos, habits (streaks), emails, and anything notable. Be thorough but organized.\n" : ""}
+${isCatchUp && !isTeamInGroup ? "\nThe user wants a full catch-up summary. Cover: calendar, todos, habits (streaks), emails, and anything notable. Be thorough but organized.\n" : ""}
 User: ${userMessage}
 `.trim();
 }

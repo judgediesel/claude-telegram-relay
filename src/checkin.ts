@@ -12,6 +12,9 @@ import {
   RAYA_SYSTEM_PROMPT,
   calendarClient,
   GOOGLE_CALENDAR_ID,
+  getAllCalendarIds,
+  personalCalendarClient,
+  resolveCalendarId,
 } from "./config";
 import { getMemoryContext, getTodoContext, getHabitContext, getContactContext, logCheckin, getLastCheckinTime, storeMessage, getHabitAnalytics } from "./memory";
 import { getCalendarContext } from "./calendar";
@@ -29,8 +32,31 @@ import { GMAIL_ENABLED } from "./config";
 // SCHEDULED CHECK-INS
 // ============================================================
 
+// Hard cap: max 3 check-ins per day (code-enforced, not just prompt guidance)
+let checkinCountToday = 0;
+let checkinCountDate = "";
+
+function getCheckinDate(): string {
+  return new Date().toLocaleDateString("en-US", {
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  });
+}
+
 export async function runCheckin(): Promise<void> {
   if (!CHECKIN_ENABLED) return;
+
+  // Reset counter at midnight
+  const today = getCheckinDate();
+  if (today !== checkinCountDate) {
+    checkinCountToday = 0;
+    checkinCountDate = today;
+  }
+
+  // Hard cap: no more than 3 check-ins per day
+  if (checkinCountToday >= 3) {
+    console.log(`Check-in skipped: already sent ${checkinCountToday} today (max 3)`);
+    return;
+  }
 
   try {
     const [memoryContext, calendarContext, todoContext, habitContext, emailContext] = await Promise.all([
@@ -69,6 +95,7 @@ You are considering whether to send a check-in message to Mark via Telegram.
 
 CURRENT TIME: ${timeStr}
 LAST CHECK-IN: ${lastCheckinStr}
+CHECK-INS SENT TODAY: ${checkinCountToday} of 3 max
 ${memoryContext}
 ${calendarContext}
 ${todoContext}
@@ -77,17 +104,17 @@ ${emailContext}
 ${adsContext}
 
 RULES:
-1. Max 2-3 check-ins per day. If you've already checked in recently, say NO.
-2. Only check in if there's a genuine REASON — a goal deadline approaching, a todo with an upcoming due date, a habit not yet done today, an important unread email, it's been a long time since last contact, a meaningful follow-up, an upcoming calendar event worth a heads-up, or a natural time-of-day touchpoint.
-3. Consider time of day. Late night or very early morning — probably NO.
-4. Be brief, warm, and direct. Not robotic. Not annoying. Sound like a trusted friend.
-5. If you have nothing meaningful to say, say NO.
-6. Never mention that you're an AI deciding whether to check in. Just be natural.
-7. If there are upcoming calendar events, mention them naturally.
+1. STRICT MAX: Only 3 check-ins per day. You've already sent ${checkinCountToday} today. If you've sent 2+, you need a VERY strong reason for another. Default to NO.
+2. Do NOT send schedule/calendar updates as check-ins. Mark already gets a morning briefing with the full schedule and 2-minute-before meeting alerts. Only mention calendar events if something changed unexpectedly or needs action.
+3. Only check in if there's a genuine REASON — a goal deadline approaching, a todo with an upcoming due date, a habit not yet done today, an important unread email, a meaningful follow-up, or something truly noteworthy. NOT just "here's what's coming up."
+4. Consider time of day. Late night or very early morning — probably NO.
+5. Be brief, warm, and direct. Not robotic. Not annoying. Sound like a trusted friend.
+6. If you have nothing NEW or ACTIONABLE to say, say NO. Repeating the same schedule info is not a reason.
+7. Never mention that you're an AI deciding whether to check in. Just be natural.
 8. If a habit hasn't been done today, gently nudge — don't lecture.
 9. Remember Mark has ADD — help him stay focused. If he has todos piling up, help prioritize.
 10. URGENCY: If something is truly time-critical (meeting in <10 min, critical deadline today), set ESCALATE to CALL. Otherwise ESCALATE should be NONE.
-11. If ad performance data is available, flag anomalies — zero spend, spend spikes, or major performance drops are worth mentioning. Mark runs a $3M+ performance marketing business so ad issues are high priority.
+11. If ad performance data is available, flag anomalies — zero spend, spend spikes, or major performance drops are worth mentioning.
 
 RESPOND IN THIS EXACT FORMAT (no extra text):
 DECISION: YES or NO
@@ -114,12 +141,13 @@ MESSAGE: [Your message to the user if YES, or "none" if NO]
       const escalateMatch = response.match(/ESCALATE:\s*(NONE|CALL)/i);
       const escalate = escalateMatch?.[1]?.toUpperCase() || "NONE";
 
+      checkinCountToday++;
       const { cleaned, intents } = processIntents(message);
       await Promise.all(intents);
       await storeMessage("assistant", cleaned, { source: "checkin" });
       await sendTelegramText(cleaned);
       await logCheckin("YES", reason, cleaned);
-      console.log(`Check-in sent: ${cleaned.substring(0, 80)}...`);
+      console.log(`Check-in sent (${checkinCountToday}/3 today): ${cleaned.substring(0, 80)}...`);
 
       // Escalate to phone call for urgent items
       if (escalate === "CALL" && TWILIO_ENABLED && TWILIO_PUBLIC_URL) {
@@ -141,37 +169,56 @@ MESSAGE: [Your message to the user if YES, or "none" if NO]
 
 const remindedEvents = new Set<string>();
 
+/** Get the calendar client for a given calendar ID */
+function getClientForCalendar(calendarId: string) {
+  const personal = resolveCalendarId("personal");
+  if (personal && calendarId === personal && personalCalendarClient) {
+    return personalCalendarClient;
+  }
+  return calendarClient;
+}
+
 export async function checkUpcomingReminders(): Promise<void> {
   if (!CALENDAR_ENABLED || !calendarClient) return;
 
   try {
     const now = new Date();
-    const soon = new Date(now.getTime() + 15 * 60000); // 15 min from now
+    const soon = new Date(now.getTime() + 3 * 60000); // 3 min from now (catch 2-min window)
 
-    const res = await calendarClient.events.list({
-      calendarId: GOOGLE_CALENDAR_ID,
-      timeMin: now.toISOString(),
-      timeMax: soon.toISOString(),
-      singleEvents: true,
-      orderBy: "startTime",
-    });
+    // Check all configured calendars for upcoming events
+    for (const { id } of getAllCalendarIds()) {
+      const client = getClientForCalendar(id);
+      if (!client) continue;
 
-    const events = res.data.items || [];
-    for (const ev of events) {
-      const eventId = ev.id!;
-      if (remindedEvents.has(eventId)) continue;
+      try {
+        const res = await client.events.list({
+          calendarId: id,
+          timeMin: now.toISOString(),
+          timeMax: soon.toISOString(),
+          singleEvents: true,
+          orderBy: "startTime",
+        });
 
-      const start = ev.start?.dateTime ? new Date(ev.start.dateTime) : null;
-      if (!start) continue;
+        const events = res.data.items || [];
+        for (const ev of events) {
+          const eventId = ev.id!;
+          if (remindedEvents.has(eventId)) continue;
 
-      const minsUntil = Math.round((start.getTime() - now.getTime()) / 60000);
-      if (minsUntil <= 15 && minsUntil > 0) {
-        remindedEvents.add(eventId);
-        const location = ev.location ? ` at ${ev.location}` : "";
-        await sendTelegramText(
-          `Heads up — "${ev.summary}" starts in ${minsUntil} minute${minsUntil === 1 ? "" : "s"}${location}`
-        );
-        console.log(`Reminder sent: ${ev.summary} in ${minsUntil} min`);
+          const start = ev.start?.dateTime ? new Date(ev.start.dateTime) : null;
+          if (!start) continue;
+
+          const minsUntil = Math.round((start.getTime() - now.getTime()) / 60000);
+          if (minsUntil <= 2 && minsUntil > 0) {
+            remindedEvents.add(eventId);
+            const location = ev.location ? ` at ${ev.location}` : "";
+            await sendTelegramText(
+              `Heads up — "${ev.summary}" starts in ${minsUntil} minute${minsUntil === 1 ? "" : "s"}${location}`
+            );
+            console.log(`Reminder sent: ${ev.summary} in ${minsUntil} min`);
+          }
+        }
+      } catch (err) {
+        console.error(`checkUpcomingReminders error for ${id}:`, err);
       }
     }
   } catch (error) {
@@ -192,33 +239,42 @@ export async function checkPostMeetingDebrief(): Promise<void> {
     const now = new Date();
     const tenMinAgo = new Date(now.getTime() - 10 * 60000);
 
-    // Find events that ended in the last 10 minutes
-    const res = await calendarClient.events.list({
-      calendarId: GOOGLE_CALENDAR_ID,
-      timeMin: tenMinAgo.toISOString(),
-      timeMax: now.toISOString(),
-      singleEvents: true,
-      orderBy: "startTime",
-    });
+    // Check all configured calendars for recently ended events
+    for (const { id } of getAllCalendarIds()) {
+      const client = getClientForCalendar(id);
+      if (!client) continue;
 
-    const events = res.data.items || [];
-    for (const ev of events) {
-      const eventId = ev.id!;
-      if (debriefedEvents.has(eventId)) continue;
+      try {
+        const res = await client.events.list({
+          calendarId: id,
+          timeMin: tenMinAgo.toISOString(),
+          timeMax: now.toISOString(),
+          singleEvents: true,
+          orderBy: "startTime",
+        });
 
-      const end = ev.end?.dateTime ? new Date(ev.end.dateTime) : null;
-      if (!end) continue;
+        const events = res.data.items || [];
+        for (const ev of events) {
+          const eventId = ev.id!;
+          if (debriefedEvents.has(eventId)) continue;
 
-      // Only debrief events that actually ended (not ones still running)
-      if (end.getTime() > now.getTime()) continue;
+          const end = ev.end?.dateTime ? new Date(ev.end.dateTime) : null;
+          if (!end) continue;
 
-      const minsAgo = Math.round((now.getTime() - end.getTime()) / 60000);
-      if (minsAgo <= 10 && minsAgo >= 0) {
-        debriefedEvents.add(eventId);
-        await sendTelegramText(
-          `How did "${ev.summary}" go? Anything worth noting or following up on?`
-        );
-        console.log(`Post-meeting debrief: ${ev.summary}`);
+          // Only debrief events that actually ended (not ones still running)
+          if (end.getTime() > now.getTime()) continue;
+
+          const minsAgo = Math.round((now.getTime() - end.getTime()) / 60000);
+          if (minsAgo <= 10 && minsAgo >= 0) {
+            debriefedEvents.add(eventId);
+            await sendTelegramText(
+              `How did "${ev.summary}" go? Anything worth noting or following up on?`
+            );
+            console.log(`Post-meeting debrief: ${ev.summary}`);
+          }
+        }
+      } catch (err) {
+        console.error(`checkPostMeetingDebrief error for ${id}:`, err);
       }
     }
   } catch (error) {

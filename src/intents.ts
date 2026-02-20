@@ -3,7 +3,7 @@
  */
 
 import { storeFact, storeGoal, completeGoal, storeTodo, completeTodo, storeHabit, completeHabit, removeHabit, storeContact } from "./memory";
-import { createCalendarEvent } from "./calendar";
+import { createCalendarEvent, updateCalendarEvent, deleteCalendarEvent } from "./calendar";
 import { sendSMS, makeCall } from "./twilio";
 import { validateIntent, auditIntent } from "./intent-security";
 import { scanEmailsForEvents, approveEvents } from "./email-calendar";
@@ -47,19 +47,62 @@ export function processIntents(response: string): { cleaned: string; intents: Pr
     cleaned = cleaned.replace(match[0], "");
   }
 
-  // [CALENDAR: title | DATE: YYYY-MM-DD | TIME: HH:MM | DURATION: minutes]
+  // [CALENDAR: title | DATE: YYYY-MM-DD | TIME: HH:MM | DURATION: minutes | CAL: name]
   for (const match of response.matchAll(
-    /\[CALENDAR:\s*(.+?)\s*\|\s*DATE:\s*(\d{4}-\d{2}-\d{2})\s*\|\s*TIME:\s*(\d{2}:\d{2})(?:\s*\|\s*DURATION:\s*(\d+))?\]/gi
+    /\[CALENDAR:\s*(.+?)\s*\|\s*DATE:\s*(\d{4}-\d{2}-\d{2})\s*\|\s*TIME:\s*(\d{2}:\d{2})(?:\s*\|\s*DURATION:\s*(\d+))?(?:\s*\|\s*CAL:\s*(.+?))?\]/gi
   )) {
     const title = match[1].trim();
+    const calName = match[5]?.trim();
     const payload = `${title} on ${match[2].trim()} at ${match[3].trim()}`;
     const check = validateIntent("CALENDAR", payload);
     intents.push(
       auditIntent("CALENDAR", payload, check.allowed ? "allowed" : "blocked", check.reason).then(() => {
         if (check.allowed) {
-          return createCalendarEvent(title, match[2].trim(), match[3].trim(), match[4] ? parseInt(match[4]) : 60);
+          return createCalendarEvent(title, match[2].trim(), match[3].trim(), match[4] ? parseInt(match[4]) : 60, calName);
         }
         console.log(`[Security] Blocked CALENDAR: ${check.reason}`);
+      })
+    );
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [CALENDAR_UPDATE: title search | DATE: YYYY-MM-DD | TIME: HH:MM | DURATION: optional minutes | CAL: name]
+  for (const match of response.matchAll(
+    /\[CALENDAR_UPDATE:\s*(.+?)\s*\|\s*DATE:\s*(\d{4}-\d{2}-\d{2})\s*\|\s*TIME:\s*(\d{2}:\d{2})(?:\s*\|\s*DURATION:\s*(\d+))?(?:\s*\|\s*CAL:\s*(.+?))?\]/gi
+  )) {
+    const title = match[1].trim();
+    const calName = match[5]?.trim();
+    const payload = `Update "${title}" on ${match[2].trim()} to ${match[3].trim()}`;
+    const check = validateIntent("CALENDAR", payload);
+    intents.push(
+      auditIntent("CALENDAR", payload, check.allowed ? "allowed" : "blocked", check.reason).then(async () => {
+        if (check.allowed) {
+          const ok = await updateCalendarEvent(title, match[2].trim(), match[3].trim(), match[4] ? parseInt(match[4]) : undefined, calName);
+          if (!ok) console.log(`[Calendar] Could not find/update event matching "${title}"`);
+        } else {
+          console.log(`[Security] Blocked CALENDAR_UPDATE: ${check.reason}`);
+        }
+      })
+    );
+    cleaned = cleaned.replace(match[0], "");
+  }
+
+  // [CALENDAR_DELETE: title search | DATE: YYYY-MM-DD | CAL: name]
+  for (const match of response.matchAll(
+    /\[CALENDAR_DELETE:\s*(.+?)\s*\|\s*DATE:\s*(\d{4}-\d{2}-\d{2})(?:\s*\|\s*CAL:\s*(.+?))?\]/gi
+  )) {
+    const title = match[1].trim();
+    const calName = match[3]?.trim();
+    const payload = `Delete "${title}" on ${match[2].trim()}`;
+    const check = validateIntent("CALENDAR", payload);
+    intents.push(
+      auditIntent("CALENDAR", payload, check.allowed ? "allowed" : "blocked", check.reason).then(async () => {
+        if (check.allowed) {
+          const ok = await deleteCalendarEvent(title, match[2].trim(), calName);
+          if (!ok) console.log(`[Calendar] Could not find/delete event matching "${title}"`);
+        } else {
+          console.log(`[Security] Blocked CALENDAR_DELETE: ${check.reason}`);
+        }
       })
     );
     cleaned = cleaned.replace(match[0], "");
